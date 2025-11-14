@@ -14,7 +14,7 @@ TARGET = 'temperaturasaidafp'
 WOE_COL = ['qualidade'] 
 OHE_COL = ['panela']
 SWITCH_FEATURE = 'Desvio_Legado_Target' 
-LIMITE_VALIDACAO = 1000
+LIMITE_VALIDACAO = 2000
 LIMITE_USOU = 5 
 DELTA_NEG = 5   
 DELTA_POS = 10 
@@ -81,7 +81,6 @@ X_operadores = df_operadores.drop(TARGET, axis=1).drop(COLS_TO_EXCLUDE_FROM_X, a
 # 4.3. Separação X e Y (VALIDAÇÃO)
 Y_validacao = df_validacao_final[TARGET]
 X_validacao = df_validacao_final.drop(TARGET, axis=1).drop(COLS_TO_EXCLUDE_FROM_X, axis=1)
-# O pred_legado FINAL está salvo no df_validacao_final (o que permite o cálculo)
 
 # --- 5. TARGET ENCODING (TARGET ENCODER) ---
 
@@ -102,7 +101,7 @@ X_val_usou_final = pd.get_dummies(X_val_usou, columns=OHE_COL, drop_first=True)
 X_val_op = target_encoder_op.transform(X_validacao.copy())
 X_val_op_final = pd.get_dummies(X_val_op, columns=OHE_COL, drop_first=True)
 
-# Alinhamento de Colunas (CRUCIAL para o XGBoost)
+# Alinhamento de Colunas
 colunas_mestras = X_usou_final.columns.union(X_operadores_final.columns)
 
 X_usou_final = X_usou_final.reindex(columns=colunas_mestras, fill_value=0)
@@ -111,18 +110,17 @@ X_val_usou_final = X_val_usou_final.reindex(columns=colunas_mestras, fill_value=
 X_val_op_final = X_val_op_final.reindex(columns=colunas_mestras, fill_value=0)
 
 # --- 6. TREINAMENTO DOS MODELOS XGBOOST ---
-model_usou = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42, tree_method='hist')
+model_usou = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42, tree_method='hist',booster = 'dart')
 model_usou.fit(X_usou_final, Y_usou)
 
-model_op = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42, tree_method='hist')
+model_op = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42, tree_method='hist',booster = 'dart')
 model_op.fit(X_operadores_final, Y_operadores)
 
 # --- 7. PREDIÇÃO E MECANISMO DE SWITCH ---
 pred_usou = model_usou.predict(X_val_usou_final)
 pred_op = model_op.predict(X_val_op_final)
-
 # Mecanismo de SWITCH: Se o desvio Legado/Alvo for baixo, usa o Modelo USOU
-desvio_val = df_validacao_final[SWITCH_FEATURE].abs() # Puxamos do DF validacao completo
+desvio_val = df_validacao_final[SWITCH_FEATURE].abs()
 
 pred_novo_modelo = np.where(
     desvio_val <= LIMITE_USOU,
@@ -130,7 +128,7 @@ pred_novo_modelo = np.where(
     pred_op
 )
 
-# Definição do Baseline (Agora funciona!)
+# Definição do Baseline
 pred_legado = df_validacao_final['sugestaomodelolegado'] 
 
 # --- 8. AVALIAÇÃO DO NOVO MODELO VS. LEGADO (MÉTRICA ASSIMÉTRICA) ---#
@@ -138,6 +136,8 @@ mse_novo = mean_squared_error(Y_validacao, pred_novo_modelo)
 mse_legado = mean_squared_error(Y_validacao, pred_legado)
 rmse_novo = np.sqrt(mse_novo)
 rmse_legado = np.sqrt(mse_legado)
+r2_score_novo = r2_score(Y_validacao, pred_novo_modelo)
+r2_score_legado = r2_score(Y_validacao, pred_legado)    
 # Métrica de Acerto: O erro deve estar entre -5°C e +10°C
 erro_novo = pred_novo_modelo - Y_validacao
 erro_legado = pred_legado - Y_validacao
@@ -155,6 +155,16 @@ print("------------------------------------------------------------------")
 print(f"RMSE (Legado): {rmse_legado:.2f} °C")
 print(f"RMSE (Novo Modelo Segmentado - XGBoost): {rmse_novo:.2f} °C")
 print("------------------------------------------------------------------")
+print(f"R² (Legado): {r2_score_legado:.4f}")
+print(f"R² (Novo Modelo Segmentado - XGBoost): {r2_score_novo:.4f}")
+print("------------------------------------------------------------------")
 print(f"Taxa de Acerto (-{DELTA_NEG}°C a +{DELTA_POS}°C) Legado: {acerto_legado:.2f}%")
 print(f"Taxa de Acerto (-{DELTA_NEG}°C a +{DELTA_POS}°C) Novo Modelo: {acerto_novo:.2f}%")
 print("------------------------------------------------------------------")
+print(f"Erro pra baixo (-{DELTA_NEG}°C) Legado: {(100 - acerto_legado)/2:.2f}%")
+print(f"Erro pra baixo (-{DELTA_NEG}°C) Novo Modelo: {(100 - acerto_novo)/2:.2f}%")
+print("------------------------------------------------------------------") 
+print(f"Erro pra cima (+{DELTA_POS}°C) Legado: {(100 - acerto_legado)/2:.2f}%")
+print(f"Erro pra cima (+{DELTA_POS}°C) Novo Modelo: {(100 - acerto_novo)/2:.2f}%")
+print("------------------------------------------------------------------")
+print("Quantidade de corridas na Validação:", len(Y_validacao))
