@@ -8,7 +8,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.tools.tools import add_constant
-from xgboost import XGBRegressor
+from modeloxgb import XGBRegressor
 # --- 0. DEFINIÇÕES E PARÂMETROS ---
 TARGET = 'temperaturasaidafp'
 WOE_COL = ['qualidade'] 
