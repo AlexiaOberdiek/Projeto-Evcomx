@@ -3,18 +3,33 @@ import seaborn as sns
 import numpy as np
 import matplotlib.pyplot as plt
 import category_encoders as ce
+import xgboost as xgb
+import optuna as opt   
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.tools.tools import add_constant
-from modeloxgb import XGBRegressor
+from xgboost import XGBRegressor
+def custom_asymmetric_loss(y_true, y_pred):
+    resid = y_pred - y_true # Cálculo do Resíduo (Previsão - Real)
+
+# ALPHA: O quanto penalizamos o erro negativo.
+    # 1.0 = Simétrico (RMSE padrão)
+    # 2.0 = Muito Conservador (O que você rodou agora)
+    # 1.2 a 1.5 = Viés Leve de Segurança (Tentativa recomendada)
+    alpha = 1.2
+
+    grad = np.where(resid < 0, alpha * resid, 1.0 * resid) 
+    hess = np.where(resid < 0, alpha, 1.0)
+    
+    return grad, hess
 # --- 0. DEFINIÇÕES E PARÂMETROS ---
 TARGET = 'temperaturasaidafp'
 WOE_COL = ['qualidade'] 
 OHE_COL = ['panela']
 SWITCH_FEATURE = 'Desvio_Legado_Target' 
-LIMITE_VALIDACAO = 2000
+LIMITE_VALIDACAO = 500
 LIMITE_USOU = 5 
 DELTA_NEG = 5   
 DELTA_POS = 10 
@@ -69,7 +84,6 @@ df_usou = df_treino_bruto[df_treino_bruto['usage'] == 'usou'].drop(columns=['usa
 df_operadores = df_treino_bruto[df_treino_bruto['usage'] == 'Naousou'].drop(columns=['usage'], errors='ignore').copy()
 
 # --- 4. SEPARAÇÃO X/Y E DROPPING FINAL (Onde o Legado é Removido das FEATURES) ---
-
 # 4.1. Separação X e Y (USOU)
 Y_usou = df_usou[TARGET]
 X_usou = df_usou.drop(TARGET, axis=1).drop(COLS_TO_EXCLUDE_FROM_X, axis=1)
@@ -110,10 +124,22 @@ X_val_usou_final = X_val_usou_final.reindex(columns=colunas_mestras, fill_value=
 X_val_op_final = X_val_op_final.reindex(columns=colunas_mestras, fill_value=0)
 
 # --- 6. TREINAMENTO DOS MODELOS XGBOOST ---
-model_usou = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42, tree_method='hist',booster = 'dart')
+model_usou = XGBRegressor(n_estimators=382, 
+                          learning_rate=0.02, 
+                          random_state=42,
+                          objective=custom_asymmetric_loss,
+                          booster='dart',
+                          max_depth=12,
+                          alpha=0.03,
+                          colsample_bytree=0.76,
+                          min_child_weight=2,
+                          lambda=0.007,
+                          subsample = 0.715)
+    
 model_usou.fit(X_usou_final, Y_usou)
 
-model_op = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42, tree_method='hist',booster = 'dart')
+model_op = XGBRegressor(n_estimators=1064, learning_rate=0.02, random_state=42,booster='dart',objective=custom_asymmetric_loss
+                        )
 model_op.fit(X_operadores_final, Y_operadores)
 
 # --- 7. PREDIÇÃO E MECANISMO DE SWITCH ---
@@ -147,7 +173,10 @@ acerto_novo = np.mean(is_hit_novo) * 100
 
 is_hit_legado = (erro_legado >= -DELTA_NEG) & (erro_legado <= DELTA_POS)
 acerto_legado = np.mean(is_hit_legado) * 100
-
+ErroBaixoLegado = np.mean(erro_legado < -DELTA_NEG) * 100
+ErroCimaLegado = np.mean(erro_legado > DELTA_POS) * 100
+ErroBaixoNovo = np.mean(erro_novo < -DELTA_NEG) * 100
+ErroCimaNovo = np.mean(erro_novo > DELTA_POS) * 100
 
 # --- 9. EXIBIÇÃO DOS RESULTADOS ---
 print("\n--- RESULTADOS FINAIS NO TESTE TEMPORAL (ÚLTIMAS 500 CORRIDAS) ---")
@@ -161,10 +190,10 @@ print("------------------------------------------------------------------")
 print(f"Taxa de Acerto (-{DELTA_NEG}°C a +{DELTA_POS}°C) Legado: {acerto_legado:.2f}%")
 print(f"Taxa de Acerto (-{DELTA_NEG}°C a +{DELTA_POS}°C) Novo Modelo: {acerto_novo:.2f}%")
 print("------------------------------------------------------------------")
-print(f"Erro pra baixo (-{DELTA_NEG}°C) Legado: {(100 - acerto_legado)/2:.2f}%")
-print(f"Erro pra baixo (-{DELTA_NEG}°C) Novo Modelo: {(100 - acerto_novo)/2:.2f}%")
+print(f"Erro pra baixo (-{DELTA_NEG}°C) Legado: {(ErroBaixoLegado:.2f}%")
+print(f"Erro pra baixo (-{DELTA_NEG}°C) Novo Modelo: {(ErroBaixoNovo:.2f}%")
 print("------------------------------------------------------------------") 
-print(f"Erro pra cima (+{DELTA_POS}°C) Legado: {(100 - acerto_legado)/2:.2f}%")
-print(f"Erro pra cima (+{DELTA_POS}°C) Novo Modelo: {(100 - acerto_novo)/2:.2f}%")
+print(f"Erro pra cima (+{DELTA_POS}°C) Legado: {(ErroCimaLegado:.2f}%")
+print(f"Erro pra cima (+{DELTA_POS}°C) Novo Modelo: {(ErroCimaNovo:.2f}%")
 print("------------------------------------------------------------------")
 print("Quantidade de corridas na Validação:", len(Y_validacao))
