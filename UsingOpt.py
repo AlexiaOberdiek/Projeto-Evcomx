@@ -131,8 +131,8 @@ def treinar_com_optuna(X_train, Y_train, trial):
 
         "objective": custom_asymmetric_loss,
         "booster": "dart",
-        "tree_method": "hist",     # GPU AQUI
-        "device": "cuda",              # GPU AQUI
+        "tree_method": "hist", 
+        "device": "cuda",        
         "random_state": 42,
         "verbosity": 0,
         "n_jobs": -1
@@ -154,12 +154,12 @@ def treinar_com_optuna(X_train, Y_train, trial):
 #  OPTUNA EXECUÇÃO (para o modelo USOU)
 # ======================================
 study = optuna.create_study(direction="minimize")
-study.optimize(lambda trial: treinar_com_optuna(X_usou_final, Y_usou, trial), n_trials=40)
+study.optimize(lambda trial: treinar_com_optuna(X_usou_final, Y_usou, trial), n_trials=20)
 
 best_params = study.best_params
 best_params.update({
     "objective": custom_asymmetric_loss,
-    "booster": "dart",
+    "booster": "gbrtree",
     "tree_method": "gpu_hist",
     "device": "cuda",
     "random_state": 42,
