@@ -56,7 +56,7 @@ def load_and_fe(path):
     df['T_Liquid_Desvio'] = df['temperaturaobjetivada'] - df['temperaturaliquidus']
     df['Desvio_Legado_Target'] = df['sugestaomodelolegado'] - df['temperaturaobjetivada']
     df['Tempo_Sequencia'] = df['tempociclo'] * df['sequencia']
-
+    print(df[['temperaturaobjetivada', TARGET]].corr())
     return df
 
 
@@ -119,18 +119,16 @@ X_val_op_final   = X_val_op_te.reindex(columns=colunas_mestras, fill_value=0)
 #   FUNÇÃO OPTUNA
 # ======================================
 def treinar_com_optuna(X_train, Y_train, trial):
-    params = {
-        "n_estimators": trial.suggest_int("n_estimators", 300, 1200),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15),
-        "max_depth": trial.suggest_int("max_depth", 3, 12),
-        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
-        "lambda": trial.suggest_float("lambda", 1e-3, 10.0, log=True),
-        "alpha": trial.suggest_float("alpha", 1e-3, 10.0, log=True),
-
+    params = {'n_estimators': 1199,
+        'learning_rate': 0.14899302445962587, 
+        'max_depth': 9, 
+        'subsample': 0.7104270120353199, 
+        'colsample_bytree': 0.6085154011954853, 
+        'min_child_weight': 20, 
+        'reg_lambda': 0.0057238692195157375, 
+        'alpha': 0.0011236922971131884, 
         "objective": custom_asymmetric_loss,
-        "booster": "dart",
+        "booster": "gbtree",
         "tree_method": "hist", 
         "device": "cuda",        
         "random_state": 42,
@@ -154,18 +152,20 @@ def treinar_com_optuna(X_train, Y_train, trial):
 #  OPTUNA EXECUÇÃO (para o modelo USOU)
 # ======================================
 study = optuna.create_study(direction="minimize")
-study.optimize(lambda trial: treinar_com_optuna(X_usou_final, Y_usou, trial), n_trials=20)
+study.optimize(lambda trial: treinar_com_optuna(X_usou_final, Y_usou, trial),  n_trials=50)
 
 best_params = study.best_params
 best_params.update({
     "objective": custom_asymmetric_loss,
-    "booster": "gbrtree",
-    "tree_method": "gpu_hist",
+    "booster": "gbtree",
+    "tree_method": "hist",
     "device": "cuda",
     "random_state": 42,
     "verbosity": 0,
     "n_jobs": -1
 })
+
+#### TREINAR PARA TODOS OS DADOS 
 
 
 # ======================================
