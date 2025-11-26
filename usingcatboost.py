@@ -1,18 +1,31 @@
 import numpy as np
 import pandas as pd
-import optuna
-from xgboost import XGBRegressor
 import category_encoders as ce
-from sklearn.metrics import mean_squared_error, r2_score
-import warnings
+from xgboost import XGBRegressor
+from sklearn.metrics import mean_squared_error
 import matplotlib.pyplot as plt
 import seaborn as sns
+import warnings
 
 warnings.filterwarnings('ignore')
 
-# ======================================
-#   CUSTOM ASYMMETRIC LOSS
-# ======================================
+# ==============================================================================
+# 1. CONFIGURAÇÕES
+# ==============================================================================
+TARGET = 'temperaturasaidafp'
+WOE_COL = ['qualidade']
+OHE_COL = ['panela']
+# Sugestão do legado não entra como feature para evitar dependência direta, 
+# mas o modelo aprende a dinâmica pelos outros dados.
+COLS_TO_EXCLUDE_FROM_X = ['sugestaomodelolegado', 'temperaturamediareal', 'temperaturaobjetivada'] 
+
+VAL_INICIO = 7000  
+DELTA_NEG = 5   
+DELTA_POS = 10  
+
+# ==============================================================================
+# 2. FUNÇÃO DE PERDA ASSIMÉTRICA
+# ==============================================================================
 def custom_asymmetric_loss(y_true, y_pred):
     resid = y_pred - y_true
     alpha = 1.3
@@ -21,261 +34,207 @@ def custom_asymmetric_loss(y_true, y_pred):
     hess = 2.0 * factor
     return grad, hess
 
-# ======================================
-#   CONSTANTES
-# ======================================
-TARGET = 'temperaturasaidafp'
-WOE_COL = ['qualidade']
-OHE_COL = ['panela']
-COLS_TO_EXCLUDE_FROM_X = ['sugestaomodelolegado', 'temperaturamediareal', 'temperaturaobjetivada'] 
-SWITCH_FEATURE = 'Desvio_Legado_Target'
-LIMITE_VALIDACAO = 500
-LIMITE_USOU = 5
-DELTA_NEG = 5
-DELTA_POS = 10
+# ==============================================================================
+# 3. CARREGAMENTO E PREPARAÇÃO
+# ==============================================================================
+print("--- 1. Carregando Dados ---")
+df = pd.read_csv('dados_fundo_do_amanha_evcomx.csv', delimiter=';')
 
-# ======================================
-#   LOAD + FEATURE ENGINEERING
-# ======================================
-def load_and_fe(path):
-    print("Carregando dados...")
-    df = pd.read_csv(path, delimiter=';')
+# REMOÇÃO DE DUPLICATAS
+df = df.drop_duplicates(subset=['corrida'], keep='first')
 
-    # >>> AQUI ESTÁ A CORREÇÃO: REMOÇÃO DE DUPLICATAS <<<
-    qtd_antes = len(df)
-    df = df.drop_duplicates(subset=['corrida'], keep='first')
-    print(f"Duplicadas removidas: {qtd_antes - len(df)}. Total atual: {len(df)}")
+num_cols = ['al_min','c_min','c_max','n_min','s_min','sequencia','sequenciatotal',
+            'vidapanela','tempociclo','tempovacuototal','temperaturaliquidus',
+            'velocidadeobjetivada','velocidadereal','sugestaomodelolegado',
+            'temperaturasaidafp','temperaturaobjetivada','temperaturamediareal']
+for c in num_cols:
+    if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    num_cols = ['al_min','c_min','c_max','n_min','s_min','sequencia','sequenciatotal',
-                'vidapanela','tempociclo','tempovacuototal','temperaturaliquidus',
-                'velocidadeobjetivada','velocidadereal','sugestaomodelolegado',
-                'temperaturasaidafp','temperaturaobjetivada','temperaturamediareal']
-    for c in num_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
+id_cols = ['corrida','secao','acoatual','qualidade','panela']
+for c in id_cols:
+    if c in df.columns: df[c] = df[c].fillna('MISSING').astype(str)
 
-    id_cols = ['corrida','secao','acoatual','qualidade','panela']
-    for c in id_cols:
-        if c in df.columns:
-            df[c] = df[c].fillna('MISSING').astype(str)
+df['C_Medio'] = (df['c_max'] + df['c_min']) / 2
+df['T_Liquid_Desvio'] = df['temperaturaobjetivada'] - df['temperaturaliquidus']
+df['Desvio_Legado_Target'] = df['sugestaomodelolegado'] - df['temperaturaobjetivada']
+df['Tempo_Sequencia'] = df['tempociclo'] * df['sequencia']
 
-    # FE
-    df['C_Medio'] = (df['c_max'] + df['c_min']) / 2
-    df['T_Liquid_Desvio'] = df['temperaturaobjetivada'] - df['temperaturaliquidus']
-    df['Desvio_Legado_Target'] = df['sugestaomodelolegado'] - df['temperaturaobjetivada']
-    df['Tempo_Sequencia'] = df['tempociclo'] * df['sequencia']
-    
-    return df
-
-# ======================================
-#   PREPARAÇÃO E FILTRO GOLDEN BATCH
-# ======================================
-df = load_and_fe('dados_fundo_do_amanha_evcomx.csv')
-
-# Drop inicial
 cols_to_drop_early = ['acoatual','corrida','secao','c_min','c_max',
                       'temperaturaliquidus','velocidadeobjetivada','velocidadereal']
 df_clean = df.drop(columns=[c for c in cols_to_drop_early if c in df.columns], errors='ignore')
 
-# 1. Split Temporal (Treino vs Validação)
-df_valid = df_clean.iloc[-LIMITE_VALIDACAO:].copy()
-df_treino_total = df_clean.iloc[:-LIMITE_VALIDACAO].copy()
-
 # ==============================================================================
-# >>> FILTRO GOLDEN BATCH (ELITE) <<<
+# 4. SPLIT GOLDEN BATCH (MODELO ÚNICO)
 # ==============================================================================
+print(f"\n--- 2. Separando Conjuntos (Estratégia Elite) ---")
 
-# Calculamos o erro real histórico (Legado ou Operador vs Objetivo)
-# Aqui usamos a métrica de sucesso: O resultado final ficou bom?
-diff_legado_tr = df_treino_total['sugestaomodelolegado'] - df_treino_total['temperaturasaidafp']
-erro_real_treino = (df_treino_total['temperaturamediareal'] + diff_legado_tr) - df_treino_total['temperaturaobjetivada']
+# 1. Validação (Futuro)
+df_valid = df_clean.iloc[VAL_INICIO:].copy()
 
-# Máscara de Sucesso: Só queremos aprender com corridas que ficaram entre -5 e +10
+# 2. Treino Total (Passado)
+df_treino_total = df_clean.iloc[:VAL_INICIO].copy()
+
+# 3. Filtro Elite (Golden Batch)
+# Critério: Resultado Real ficou entre -5 e +10 do Objetivo?
+erro_real_treino = (df_treino_total['temperaturamediareal']) - df_treino_total['temperaturaobjetivada']
 mask_gold = (erro_real_treino >= -DELTA_NEG) & (erro_real_treino <= DELTA_POS)
 
-# Separamos o Treino em "Elite" (Acertos) e "Sujos" (Erros Operacionais)
-df_treino_gold = df_treino_total[mask_gold].copy()
-df_treino_dirty = df_treino_total[~mask_gold].copy()
+df_treino_gold = df_treino_total[mask_gold].copy()    # ELITE (Treino)
+df_treino_dirty = df_treino_total[~mask_gold].copy()  # SUJOS (Teste)
 
-print(f"Total Treino Histórico: {len(df_treino_total)}")
-print(f"Treino ELITE (Usado para aprender): {len(df_treino_gold)} ({(len(df_treino_gold)/len(df_treino_total))*100:.1f}%)")
-print(f"Treino SUJO (Ignorado no treino, usado para teste): {len(df_treino_dirty)}")
+print(f"Treino ELITE (Apenas Acertos): {len(df_treino_gold)}")
+print(f"Dados SUJOS (Recuperação): {len(df_treino_dirty)}")
+print(f"Validação (Futuro): {len(df_valid)}")
 
-# -----------------------------------------------------------
-# Lógica de USOU / NÃO USOU (Aplicada APENAS na Elite)
-# -----------------------------------------------------------
-df_treino_gold['usage'] = np.where(
-    (df_treino_gold['sugestaomodelolegado'] - df_treino_gold[TARGET]).abs() <= LIMITE_USOU,
-    'usou', 'Naousou'
-)
-
-df_usou = df_treino_gold[df_treino_gold['usage']=='usou'].drop(columns=['usage'])
-df_op = df_treino_gold[df_treino_gold['usage']=='Naousou'].drop(columns=['usage'])
-
-# Função auxiliar de split
+# Função auxiliar para separar X e Y
 def split_XY(df_part):
     Y = df_part[TARGET].copy()
     X = df_part.drop(columns=[TARGET] + COLS_TO_EXCLUDE_FROM_X, errors='ignore')
     return X, Y
 
-# Dados de Treino (Só Elite)
-X_usou, Y_usou = split_XY(df_usou)
-X_op, Y_op = split_XY(df_op)
-
-# Dados de Teste (Validação e Sujos)
-X_val, Y_val = split_XY(df_valid)
+# Criação dos Datasets (Sem separar Usou/Op)
+X_elite, Y_elite = split_XY(df_treino_gold)
+X_valid, Y_valid = split_XY(df_valid)
 X_dirty, Y_dirty = split_XY(df_treino_dirty)
 
-# ======================================
-#   ENCODERS (Treinados SÓ na Elite)
-# ======================================
-def encode_target_and_ohe(X_train, y_train, list_X_apply, woe_cols=WOE_COL, ohe_cols=OHE_COL):
-    # Fit apenas no X_train (Elite)
-    te = ce.TargetEncoder(cols=woe_cols)
-    X_train_te = te.fit_transform(X_train, y_train)
-    X_train_final = pd.get_dummies(X_train_te, columns=ohe_cols, drop_first=True)
-    
-    # Lista de outputs transformados
-    outputs = [X_train_final]
-    colunas_mestras = X_train_final.columns
-    
-    # Transform nos outros (Validação, Dirty, etc)
-    for X_app in list_X_apply:
-        X_app_te = te.transform(X_app.copy())
-        X_app_final = pd.get_dummies(X_app_te, columns=ohe_cols, drop_first=True)
-        # Garante alinhamento de colunas
-        X_app_final = X_app_final.reindex(columns=colunas_mestras, fill_value=0)
-        outputs.append(X_app_final)
+# ==============================================================================
+# 5. ENCODING (ÚNICO)
+# ==============================================================================
+print("\n--- 3. Aplicando Encoders ---")
 
-    return outputs # Retorna [Treino, Apply1, Apply2...]
+# Treina o encoder APENAS na Elite
+te = ce.TargetEncoder(cols=WOE_COL)
+X_elite_te = te.fit_transform(X_elite, Y_elite)
+X_elite_final = pd.get_dummies(X_elite_te, columns=OHE_COL, drop_first=True)
 
-# Encoders para o modelo USOU
-out_usou = encode_target_and_ohe(X_usou, Y_usou, [X_val, X_dirty])
-X_usou_final, X_val_usou_final, X_dirty_usou_final = out_usou[0], out_usou[1], out_usou[2]
+# Aplica nos outros conjuntos
+def aplicar_encoder(X_raw, encoder_treinado, colunas_modelo):
+    X_te = encoder_treinado.transform(X_raw.copy())
+    X_final = pd.get_dummies(X_te, columns=OHE_COL, drop_first=True)
+    # Garante as mesmas colunas do treino
+    X_final = X_final.reindex(columns=colunas_modelo, fill_value=0)
+    return X_final
 
-# Encoders para o modelo OP
-out_op = encode_target_and_ohe(X_op, Y_op, [X_val, X_dirty])
-X_op_final, X_val_op_final, X_dirty_op_final = out_op[0], out_op[1], out_op[2]
+colunas_mestras = X_elite_final.columns
+X_valid_final = aplicar_encoder(X_valid, te, colunas_mestras)
+X_dirty_final = aplicar_encoder(X_dirty, te, colunas_mestras)
 
-# ======================================
-#   TREINO (XGBOOST)
-# ======================================
+# ==============================================================================
+# 6. TREINO (MODELO ÚNICO)
+# ==============================================================================
 best_params = {
-    'n_estimators': 1199,
-    'learning_rate': 0.148993, 
-    'max_depth': 9, 
-    'subsample': 0.7104, 
-    'colsample_bytree': 0.6085, 
-    'min_child_weight': 20, 
-    'reg_lambda': 0.0057, 
-    'alpha': 0.0011, 
-    "objective": custom_asymmetric_loss,
+    'n_estimators': 1500, # Um pouco mais de árvores para compensar a unificação
+    'learning_rate': 0.10, 
+    'max_depth': 8, 
+    'subsample': 0.7, 
+    'colsample_bytree': 0.7, 
+    'min_child_weight': 15, 
+    'reg_lambda': 0.01, 
+    'alpha': 0.01, 
+    "objective": custom_asymmetric_loss, 
     "booster": "gbtree",
-    "tree_method": "hist", 
-    "device": "cuda",        
-    "random_state": 42,
-    "verbosity": 0,
-    "n_jobs": -1
+    "tree_method": "hist", "device": "cuda", "random_state": 42,
+    "verbosity": 0, "n_jobs": -1
 }
 
-print("\n>>> Treinando Modelos na Elite (Golden Batch)...")
-model_usou = XGBRegressor(**best_params)
-model_op   = XGBRegressor(**best_params)
+print("\n--- 4. Treinando Modelo Único (XGBoost) ---")
+model_unique = XGBRegressor(**best_params)
+model_unique.fit(X_elite_final, Y_elite)
 
-model_usou.fit(X_usou_final, Y_usou)
-model_op.fit(X_op_final, Y_op)
+# ==============================================================================
+# 7. CÁLCULO DO VIÉS
+# ==============================================================================
+# Predição na Elite para calcular a calibração
+p_tr_elite = model_unique.predict(X_elite_final)
+vies_calculado = np.mean(p_tr_elite - Y_elite)
 
-# ======================================
-#   AVALIAÇÃO
-# ======================================
-def avaliar_dataset(X_u, X_o, df_orig, Y_orig, nome_set):
-    # Predições
-    p_usou = model_usou.predict(X_u)
-    p_op = model_op.predict(X_o)
+print(f"\n>>> VIÉS DETECTADO NA ELITE: {vies_calculado:.2f} °C")
+
+# ==============================================================================
+# 8. FUNÇÃO DE AVALIAÇÃO SIMPLIFICADA
+# ==============================================================================
+def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=False):
+    print(f"\n>>> AVALIANDO: {nome_dataset} (Correção: {usar_vies})")
     
-    # Switch
-    desvio = df_orig[SWITCH_FEATURE].abs()
-    pred_final = np.where(desvio <= LIMITE_USOU, p_usou, p_op)
+    # 1. Predição Única
+    pred_raw = model_unique.predict(X_input)
     
-    # Baseline Legado
-    pred_legado = df_orig['sugestaomodelolegado'].values
-    
-    # Cálculo Métricas Complexas (Legado vs Novo)
+    # 2. Aplicação do Viés
+    if usar_vies:
+        pred_final = pred_raw - 2
+    else:
+        pred_final = pred_raw
+        
+    # 3. Cálculo dos Erros (Fórmula Complexa)
     # Legado
     diff_legado = df_orig['sugestaomodelolegado'] - df_orig[TARGET]
     erro_legado = (df_orig['temperaturamediareal'] + diff_legado) - df_orig['temperaturaobjetivada']
     
-    # Novo
+    # Novo Modelo
     diff_novo = pred_final - df_orig[TARGET]
     erro_novo = (df_orig['temperaturamediareal'] + diff_novo) - df_orig['temperaturaobjetivada']
     
-    # Hit Rate
-    hit_legado = np.mean((erro_legado >= -DELTA_NEG) & (erro_legado <= DELTA_POS)) * 100
-    hit_novo = np.mean((erro_novo >= -DELTA_NEG) & (erro_novo <= DELTA_POS)) * 100
+    # 4. Categorização e Stats
+    df_plot = pd.DataFrame({'Legado': erro_legado, 'Novo': erro_novo})
     
-    # RMSE (Padrão)
-    rmse_novo = np.sqrt(mean_squared_error(Y_orig, pred_final))
-    rmse_legado = np.sqrt(mean_squared_error(Y_orig, pred_legado))
+    def categorizar(val):
+        if val < -DELTA_NEG: return '1. Frio'
+        elif val > DELTA_POS: return '3. Quente'
+        else: return '2. Acerto'
+
+    df_plot['Cat_Legado'] = df_plot['Legado'].apply(categorizar)
+    df_plot['Cat_Novo'] = df_plot['Novo'].apply(categorizar)
     
-    print(f"\n--- {nome_set} ---")
-    print(f"RMSE Legado: {rmse_legado:.2f} | Novo: {rmse_novo:.2f}")
-    print(f"Acerto Legado: {hit_legado:.2f}%")
-    print(f"Acerto Novo:   {hit_novo:.2f}%")
+    stats_legado = df_plot['Cat_Legado'].value_counts(normalize=True) * 100
+    stats_novo = df_plot['Cat_Novo'].value_counts(normalize=True) * 100
     
-    if nome_set == "DADOS SUJOS (Recuperação)":
-        plt.figure(figsize=(10,5))
-        sns.histplot(erro_legado, color='red', alpha=0.3, label='Erro Legado', kde=True)
-        sns.histplot(erro_novo, color='blue', alpha=0.3, label='Erro Novo', kde=True)
-        plt.axvline(-5, color='k', linestyle='--')
-        plt.axvline(10, color='k', linestyle='--')
-        plt.title(f"Recuperação de Corridas Ruins - {nome_set}")
-        plt.xlabel("Erro em relação ao Objetivo (°C)")
-        plt.legend()
-        plt.show()
+    # 5. Plotagem
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+    
+    # Histograma
+    sns.histplot(df_plot['Legado'], color='red', label='Legado', kde=True, ax=axes[0], alpha=0.3, element="step")
+    sns.histplot(df_plot['Novo'], color='purple', label='Modelo Único', kde=True, ax=axes[0], alpha=0.3, element="step")
+    axes[0].axvline(-DELTA_NEG, color='k', linestyle='--')
+    axes[0].axvline(DELTA_POS, color='k', linestyle='--')
+    axes[0].set_title(f"Distribuição de Erros - {nome_dataset}")
+    axes[0].set_xlabel("Desvio do Objetivo (°C)")
+    axes[0].legend()
+    
+    # Barras
+    categorias = ['1. Frio', '2. Acerto', '3. Quente']
+    vals_leg = [stats_legado.get(c, 0) for c in categorias]
+    vals_nov = [stats_novo.get(c, 0) for c in categorias]
+    x = np.arange(len(categorias))
+    
+    bars1 = axes[1].bar(x - 0.17, vals_leg, 0.35, label='Legado', color='red', alpha=0.7)
+    bars2 = axes[1].bar(x + 0.17, vals_nov, 0.35, label='Modelo Único', color='purple', alpha=0.7)
+    
+    axes[1].set_title(f"Comparação de Desempenho - {nome_dataset}")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(['FRIO (< -5)', 'ACERTO', 'QUENTE (> +10)'])
+    axes[1].bar_label(bars1, fmt='%.1f%%', padding=3)
+    axes[1].bar_label(bars2, fmt='%.1f%%', padding=3)
+    axes[1].legend()
+    
+    plt.tight_layout()
+    plt.show()
+    
+    resumo = pd.DataFrame({'% Legado': vals_leg, '% Novo': vals_nov}, index=['Frio', 'Acerto', 'Quente'])
+    print(resumo.round(2))
+    print("="*60)
 
-# Executa
-avaliar_dataset(X_val_usou_final, X_val_op_final, df_valid, Y_val, "VALIDAÇÃO (Futuro)")
-avaliar_dataset(X_dirty_usou_final, X_dirty_op_final, df_treino_dirty, Y_dirty, "DADOS SUJOS (Recuperação)")
-# ======================================
-#   DIAGNÓSTICO FINAL (Coloque isso no fim do arquivo)
-# ======================================
-print("\n--- DIAGNÓSTICO DE VIÉS NA VALIDAÇÃO ---")
+# ==============================================================================
+# 9. EXECUÇÃO
+# ==============================================================================
 
-# 1. Recriar as predições da Validação (para podermos analisar)
-p_usou_val = model_usou.predict(X_val_usou_final)
-p_op_val = model_op.predict(X_val_op_final)
+# 1. ELITE (Aprendizado Puro)
+avaliar_cenario_unico(X_elite_final, df_treino_gold, Y_elite, 
+                      "1. TREINO ELITE (Sem Viés)", usar_vies=False)
 
-# Aplicar o Switch
-desvio_val = df_valid[SWITCH_FEATURE].abs()
-pred_final_val = np.where(desvio_val <= LIMITE_USOU, p_usou_val, p_op_val)
+# 2. DADOS SUJOS (Recuperação)
+avaliar_cenario_unico(X_dirty_final, df_treino_dirty, Y_dirty, 
+                      "2. DADOS SUJOS (Com Correção)", usar_vies=True)
 
-# 2. Calcular o Erro Complexo (Previsão - Objetivo)
-# Fórmula: (TempMediaReal + (Pred - Real)) - Objetivo
-diff_novo = pred_final_val - df_valid[TARGET] 
-erro_novo_val = (df_valid['temperaturamediareal'] + diff_novo) - df_valid['temperaturaobjetivada']
-
-# 3. Calcular a Média desse erro (Viés)
-vies_validacao = np.mean(erro_novo_val)
-print(f">>> VIÉS MÉDIO NA VALIDAÇÃO: {vies_validacao:.2f}°C")
-# Se for positivo (ex: +3.0), o modelo está chutando acima.
-# Se for negativo (ex: -3.0), o modelo está chutando abaixo.
-
-# 4. Simulação: "E se a gente apenas corrigisse esse viés?"
-erro_corrigido = erro_novo_val - vies_validacao
-acerto_simulado = np.mean((erro_corrigido >= -DELTA_NEG) & (erro_corrigido <= DELTA_POS)) * 100
-
-print(f">>> Se aplicarmos essa correção, o acerto sobe para: {acerto_simulado:.2f}%")
-
-# 5. Plotar histograma para ver o deslocamento
-plt.figure(figsize=(10, 6))
-sns.histplot(erro_novo_val, color='blue', kde=True, label='Erro Atual (Descalibrado)', alpha=0.4)
-# Plota a versão corrigida simulada (fantasma)
-sns.histplot(erro_corrigido, color='green', kde=True, label='Erro Simulado (Se corrigir viés)', alpha=0.2)
-
-plt.axvline(-5, color='r', linestyle='--', label='Limites (-5, +10)')
-plt.axvline(10, color='r', linestyle='--')
-plt.axvline(0, color='k', linestyle='-', alpha=0.3)
-plt.title(f"Diagnóstico: Viés de {vies_validacao:.2f}°C")
-plt.xlabel("Erro em relação ao Objetivo (°C)")
-plt.legend()
-plt.show()
+# 3. VALIDAÇÃO FUTURA
+avaliar_cenario_unico(X_valid_final, df_valid, Y_valid, 
+                      "3. VALIDAÇÃO FUTURA (Com Correção)", usar_vies=True)
