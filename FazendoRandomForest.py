@@ -117,7 +117,7 @@ estimators = [
 ]
 
 # O Meta-Modelo (O Chefe)
-# RidgeCV é uma regressão linear robusta (com regularização)
+# RidgeCV é uma regressão linear robusta (ceguom rlarização)
 meta_model = RidgeCV()
 
 stacking_model = StackingRegressor(
