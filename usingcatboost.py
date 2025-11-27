@@ -121,22 +121,21 @@ vies_calculado = np.mean(p_tr_elite - Y_elite)
 print(f"\n>>> VIÉS DETECTADO NA ELITE: {vies_calculado:.2f} °C")
 
 # ==============================================================================
-# 6. FUNÇÃO DE AVALIAÇÃO SIMPLIFICADA
+# 8. FUNÇÃO DE AVALIAÇÃO DETALHADA (5 FAIXAS)
 # ==============================================================================
 def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=False):
     print(f"\n>>> AVALIANDO: {nome_dataset} (Correção: {usar_vies})")
     
-    # 1. Predição Única
+    # 1. Predição
     pred_raw = model_unique.predict(X_input)
     
-    # 2. Aplicação do Viés
+    # 2. Correção de Viés
     if usar_vies:
-        # Se quiser testar manual: pred_final = pred_raw - 2.0
-        pred_final = pred_raw - 2
+        pred_final = pred_raw - vies_calculado
     else:
         pred_final = pred_raw
         
-    # 3. Cálculo dos Erros (Fórmula Complexa)
+    # 3. Cálculo dos Erros
     # Legado
     diff_legado = df_orig['sugestaomodelolegado'] - df_orig[TARGET]
     erro_legado = (df_orig['temperaturamediareal'] + diff_legado) - df_orig['temperaturaobjetivada']
@@ -145,13 +144,15 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
     diff_novo = pred_final - df_orig[TARGET]
     erro_novo = (df_orig['temperaturamediareal'] + diff_novo) - df_orig['temperaturaobjetivada']
     
-    # 4. Categorização e Stats
+    # 4. Categorização (5 Faixas)
     df_plot = pd.DataFrame({'Legado': erro_legado, 'Novo': erro_novo})
     
     def categorizar(val):
-        if val < -DELTA_NEG: return '1. Frio'
-        elif val > DELTA_POS: return '3. Quente'
-        else: return '2. Acerto'
+        if val < -10:           return '1. Extremo Frio (< -10)'
+        elif val >= -10 and val < -5: return '2. Frio (-10 a -5)'
+        elif val >= -5 and val <= 10: return '3. Acerto (-5 a +10)'
+        elif val > 10 and val <= 20:  return '4. Quente (+10 a +20)'
+        else:                   return '5. Extremo Calor (> +20)'
 
     df_plot['Cat_Legado'] = df_plot['Legado'].apply(categorizar)
     df_plot['Cat_Novo'] = df_plot['Novo'].apply(categorizar)
@@ -160,45 +161,61 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
     stats_novo = df_plot['Cat_Novo'].value_counts(normalize=True) * 100
     
     # 5. Plotagem
-    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(20, 7))
     
-    # Histograma
+    # --- GRÁFICO 1: HISTOGRAMA ---
     sns.histplot(df_plot['Legado'], color='red', label='Legado', kde=True, ax=axes[0], alpha=0.3, element="step")
-    sns.histplot(df_plot['Novo'], color='green', label='CatBoost', kde=True, ax=axes[0], alpha=0.3, element="step")
-    axes[0].axvline(-DELTA_NEG, color='k', linestyle='--')
-    axes[0].axvline(DELTA_POS, color='k', linestyle='--')
+    sns.histplot(df_plot['Novo'], color='purple', label='Novo Modelo', kde=True, ax=axes[0], alpha=0.3, element="step")
+    
+    # Linhas de Limite
+    axes[0].axvline(-5, color='green', linestyle='--', linewidth=2, label='Meta (-5)')
+    axes[0].axvline(10, color='green', linestyle='--', linewidth=2, label='Meta (+10)')
+    axes[0].axvline(-10, color='black', linestyle=':', linewidth=2, label='Extremo (-10)')
+    axes[0].axvline(20, color='black', linestyle=':', linewidth=2, label='Extremo (+20)')
+    
     axes[0].set_title(f"Distribuição de Erros - {nome_dataset}")
     axes[0].set_xlabel("Desvio do Objetivo (°C)")
     axes[0].legend()
     
-    # Barras
-    categorias = ['1. Frio', '2. Acerto', '3. Quente']
+    # --- GRÁFICO 2: BARRAS (5 CATEGORIAS) ---
+    categorias = [
+        '1. Extremo Frio (< -10)', 
+        '2. Frio (-10 a -5)', 
+        '3. Acerto (-5 a +10)', 
+        '4. Quente (+10 a +20)', 
+        '5. Extremo Calor (> +20)'
+    ]
+    
     vals_leg = [stats_legado.get(c, 0) for c in categorias]
     vals_nov = [stats_novo.get(c, 0) for c in categorias]
     x = np.arange(len(categorias))
     
     bars1 = axes[1].bar(x - 0.17, vals_leg, 0.35, label='Legado', color='red', alpha=0.7)
-    bars2 = axes[1].bar(x + 0.17, vals_nov, 0.35, label='CatBoost', color='green', alpha=0.7)
+    bars2 = axes[1].bar(x + 0.17, vals_nov, 0.35, label='Novo Modelo', color='purple', alpha=0.7)
     
-    axes[1].set_title(f"Comparação de Desempenho - {nome_dataset}")
+    axes[1].set_title(f"Comparação Detalhada - {nome_dataset}")
     axes[1].set_xticks(x)
-    axes[1].set_xticklabels(['FRIO (< -5)', 'ACERTO', 'QUENTE (> +10)'])
-    axes[1].bar_label(bars1, fmt='%.1f%%', padding=3)
-    axes[1].bar_label(bars2, fmt='%.1f%%', padding=3)
+    # Labels curtos para o eixo X não ficar poluído
+    axes[1].set_xticklabels(['EXT. FRIO', 'Frio', 'ACERTO', 'Quente', 'EXT. CALOR'], fontsize=10)
+    
+    axes[1].bar_label(bars1, fmt='%.1f%%', padding=3, fontsize=9)
+    axes[1].bar_label(bars2, fmt='%.1f%%', padding=3, fontsize=9)
     axes[1].legend()
     
     plt.tight_layout()
     plt.show()
     
-    resumo = pd.DataFrame({'% Legado': vals_leg, '% Novo': vals_nov}, index=['Frio', 'Acerto', 'Quente'])
+    # 6. Tabela Resumo
+    resumo = pd.DataFrame({'% Legado': vals_leg, '% Novo': vals_nov}, index=categorias)
+    print(f"--- Resumo Numérico: {nome_dataset} ---")
     print(resumo.round(2))
     print("="*60)
 
 # ==============================================================================
-# 7. EXECUÇÃO
+# 9. EXECUÇÃO ATUALIZADA
 # ==============================================================================
 
-# 1. ELITE (Aprendizado Puro)
+# 1. ELITE
 avaliar_cenario_unico(X_elite, df_treino_gold, Y_elite, 
                       "1. TREINO ELITE (Sem Viés)", usar_vies=False)
 

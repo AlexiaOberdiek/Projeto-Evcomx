@@ -15,16 +15,16 @@ warnings.filterwarnings('ignore')
 TARGET = 'temperaturasaidafp'
 WOE_COL = ['qualidade']
 OHE_COL = ['panela']
-# Sugestão do legado não entra como feature para evitar dependência direta, 
-# mas o modelo aprende a dinâmica pelos outros dados.
 COLS_TO_EXCLUDE_FROM_X = ['sugestaomodelolegado', 'temperaturamediareal', 'temperaturaobjetivada'] 
+SWITCH_FEATURE = 'Desvio_Legado_Target'
 
 VAL_INICIO = 7000  
+LIMITE_USOU = 5
 DELTA_NEG = 5   
 DELTA_POS = 10  
 
 # ==============================================================================
-# 2. FUNÇÃO DE PERDA ASSIMÉTRICA
+# 2. FUNÇÃO DE PERDA ASSIMÉTRICA (XGBOOST)
 # ==============================================================================
 def custom_asymmetric_loss(y_true, y_pred):
     resid = y_pred - y_true
@@ -75,15 +75,17 @@ df_valid = df_clean.iloc[VAL_INICIO:].copy()
 df_treino_total = df_clean.iloc[:VAL_INICIO].copy()
 
 # 3. Filtro Elite (Golden Batch)
-# Critério: Resultado Real ficou entre -5 e +10 do Objetivo?
-erro_real_treino = (df_treino_total['temperaturamediareal']) - df_treino_total['temperaturaobjetivada']
-mask_gold = (erro_real_treino >= -DELTA_NEG) & (erro_real_treino <= DELTA_POS)
+# Critério: O Resultado REAL ficou bom? (Independente do Legado)
+erro_operacional_real = df_treino_total['temperaturamediareal'] - df_treino_total['temperaturaobjetivada']
+
+# Máscara: Sucesso Real (-5 a +10)
+mask_gold = (erro_operacional_real >= -DELTA_NEG) & (erro_operacional_real <= DELTA_POS)
 
 df_treino_gold = df_treino_total[mask_gold].copy()    # ELITE (Treino)
 df_treino_dirty = df_treino_total[~mask_gold].copy()  # SUJOS (Teste)
 
-print(f"Treino ELITE (Apenas Acertos): {len(df_treino_gold)}")
-print(f"Dados SUJOS (Recuperação): {len(df_treino_dirty)}")
+print(f"Treino ELITE (Sucessos Reais): {len(df_treino_gold)}")
+print(f"Dados SUJOS (Erros Reais): {len(df_treino_dirty)}")
 print(f"Validação (Futuro): {len(df_valid)}")
 
 # Função auxiliar para separar X e Y
@@ -92,7 +94,7 @@ def split_XY(df_part):
     X = df_part.drop(columns=[TARGET] + COLS_TO_EXCLUDE_FROM_X, errors='ignore')
     return X, Y
 
-# Criação dos Datasets (Sem separar Usou/Op)
+# Criação dos Datasets
 X_elite, Y_elite = split_XY(df_treino_gold)
 X_valid, Y_valid = split_XY(df_valid)
 X_dirty, Y_dirty = split_XY(df_treino_dirty)
@@ -120,10 +122,10 @@ X_valid_final = aplicar_encoder(X_valid, te, colunas_mestras)
 X_dirty_final = aplicar_encoder(X_dirty, te, colunas_mestras)
 
 # ==============================================================================
-# 6. TREINO (MODELO ÚNICO)
+# 6. TREINO (MODELO ÚNICO XGBOOST)
 # ==============================================================================
 best_params = {
-    'n_estimators': 1500, # Um pouco mais de árvores para compensar a unificação
+    'n_estimators': 1500, 
     'learning_rate': 0.10, 
     'max_depth': 8, 
     'subsample': 0.7, 
@@ -151,7 +153,7 @@ vies_calculado = np.mean(p_tr_elite - Y_elite)
 print(f"\n>>> VIÉS DETECTADO NA ELITE: {vies_calculado:.2f} °C")
 
 # ==============================================================================
-# 8. FUNÇÃO DE AVALIAÇÃO SIMPLIFICADA
+# 8. FUNÇÃO DE AVALIAÇÃO DETALHADA (5 FAIXAS)
 # ==============================================================================
 def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=False):
     print(f"\n>>> AVALIANDO: {nome_dataset} (Correção: {usar_vies})")
@@ -161,7 +163,7 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
     
     # 2. Aplicação do Viés
     if usar_vies:
-        pred_final = pred_raw - 2
+        pred_final = pred_raw - 1.5
     else:
         pred_final = pred_raw
         
@@ -174,13 +176,15 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
     diff_novo = pred_final - df_orig[TARGET]
     erro_novo = (df_orig['temperaturamediareal'] + diff_novo) - df_orig['temperaturaobjetivada']
     
-    # 4. Categorização e Stats
+    # 4. Categorização (5 Faixas)
     df_plot = pd.DataFrame({'Legado': erro_legado, 'Novo': erro_novo})
     
     def categorizar(val):
-        if val < -DELTA_NEG: return '1. Frio'
-        elif val > DELTA_POS: return '3. Quente'
-        else: return '2. Acerto'
+        if val < -10:           return '1. Extremo Frio (< -10)'
+        elif val >= -10 and val < -5: return '2. Frio (-10 a -5)'
+        elif val >= -5 and val <= 10: return '3. Acerto (-5 a +10)'
+        elif val > 10 and val <= 25:  return '4. Quente (+10 a +25)'
+        else:                   return '5. Extremo Calor (> +25)'
 
     df_plot['Cat_Legado'] = df_plot['Legado'].apply(categorizar)
     df_plot['Cat_Novo'] = df_plot['Novo'].apply(categorizar)
@@ -189,37 +193,52 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
     stats_novo = df_plot['Cat_Novo'].value_counts(normalize=True) * 100
     
     # 5. Plotagem
-    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(20, 7))
     
-    # Histograma
+    # --- GRÁFICO 1: HISTOGRAMA ---
     sns.histplot(df_plot['Legado'], color='red', label='Legado', kde=True, ax=axes[0], alpha=0.3, element="step")
-    sns.histplot(df_plot['Novo'], color='purple', label='Modelo Único', kde=True, ax=axes[0], alpha=0.3, element="step")
-    axes[0].axvline(-DELTA_NEG, color='k', linestyle='--')
-    axes[0].axvline(DELTA_POS, color='k', linestyle='--')
+    sns.histplot(df_plot['Novo'], color='purple', label='XGBoost', kde=True, ax=axes[0], alpha=0.3, element="step")
+    
+    # Linhas de Limite
+    axes[0].axvline(-5, color='green', linestyle='--', linewidth=2, label='Meta (-5)')
+    axes[0].axvline(10, color='green', linestyle='--', linewidth=2, label='Meta (+10)')
+    axes[0].axvline(-10, color='black', linestyle=':', linewidth=2, label='Extremo (-10)')
+    axes[0].axvline(20, color='black', linestyle=':', linewidth=2, label='Extremo (+20)')
+    
     axes[0].set_title(f"Distribuição de Erros - {nome_dataset}")
     axes[0].set_xlabel("Desvio do Objetivo (°C)")
     axes[0].legend()
     
-    # Barras
-    categorias = ['1. Frio', '2. Acerto', '3. Quente']
+    # --- GRÁFICO 2: BARRAS (5 CATEGORIAS) ---
+    categorias = [
+        '1. Extremo Frio (< -10)', 
+        '2. Frio (-10 a -5)', 
+        '3. Acerto (-5 a +10)', 
+        '4. Quente (+10 a +25)', 
+        '5. Extremo Calor (> +25)'
+    ]
+    
     vals_leg = [stats_legado.get(c, 0) for c in categorias]
     vals_nov = [stats_novo.get(c, 0) for c in categorias]
     x = np.arange(len(categorias))
     
     bars1 = axes[1].bar(x - 0.17, vals_leg, 0.35, label='Legado', color='red', alpha=0.7)
-    bars2 = axes[1].bar(x + 0.17, vals_nov, 0.35, label='Modelo Único', color='purple', alpha=0.7)
+    bars2 = axes[1].bar(x + 0.17, vals_nov, 0.35, label='XGBoost', color='purple', alpha=0.7)
     
-    axes[1].set_title(f"Comparação de Desempenho - {nome_dataset}")
+    axes[1].set_title(f"Comparação Detalhada - {nome_dataset}")
     axes[1].set_xticks(x)
-    axes[1].set_xticklabels(['FRIO (< -5)', 'ACERTO', 'QUENTE (> +10)'])
-    axes[1].bar_label(bars1, fmt='%.1f%%', padding=3)
-    axes[1].bar_label(bars2, fmt='%.1f%%', padding=3)
+    axes[1].set_xticklabels(['EXT. FRIO', 'Frio', 'ACERTO', 'Quente', 'EXT. CALOR'], fontsize=10)
+    
+    axes[1].bar_label(bars1, fmt='%.1f%%', padding=3, fontsize=9)
+    axes[1].bar_label(bars2, fmt='%.1f%%', padding=3, fontsize=9)
     axes[1].legend()
     
     plt.tight_layout()
     plt.show()
     
-    resumo = pd.DataFrame({'% Legado': vals_leg, '% Novo': vals_nov}, index=['Frio', 'Acerto', 'Quente'])
+    # 6. Tabela Resumo
+    resumo = pd.DataFrame({'% Legado': vals_leg, '% Novo': vals_nov}, index=categorias)
+    print(f"--- Resumo Numérico: {nome_dataset} ---")
     print(resumo.round(2))
     print("="*60)
 
@@ -227,7 +246,7 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
 # 9. EXECUÇÃO
 # ==============================================================================
 
-# 1. ELITE (Aprendizado Puro)
+# 1. ELITE
 avaliar_cenario_unico(X_elite_final, df_treino_gold, Y_elite, 
                       "1. TREINO ELITE (Sem Viés)", usar_vies=False)
 
