@@ -49,7 +49,7 @@ df['Desvio_Legado_Target'] = df['sugestaomodelolegado'] - df['temperaturaobjetiv
 df['Tempo_Sequencia'] = df['tempociclo'] * df['sequencia']
 
 cols_to_drop_early = ['acoatual','corrida','secao','c_min','c_max','s_min',
-                      'temperaturaliquidus','velocidadeobjetivada','velocidadereal']
+                      'temperaturaliquidus','velocidadeobjetivada','velocidadereal','tempociclo','sequencia','sequenciatotal']
 df_clean = df.drop(columns=[c for c in cols_to_drop_early if c in df.columns], errors='ignore')
 
 # Atualiza lista de cat_features removendo as que foram dropadas
@@ -96,14 +96,14 @@ X_dirty, Y_dirty = split_XY(df_treino_dirty)
 # ==============================================================================
 # CatBoost não precisa de encoder externo! Passamos 'cat_features' no fit.
 params = {
-    'iterations': 2000, 
-    'learning_rate': 0.05, 
+    'iterations': 3000, 
+    'learning_rate': 0.1, 
     'depth':6,
-    'loss_function': 'Expectile:alpha=0.7', # RMSE é mais rápido e estável. Corrigimos o viés depois.
-    'eval_metric': 'Expectile',
+    'loss_function': 'RMSE', # RMSE é mais rápido e estável. Corrigimos o viés depois.
+    'eval_metric': 'RMSE',
     'task_type' : 'CPU',
     'random_seed': 42,
-    'verbose': 500,
+    'verbose': 500, 
     'allow_writing_files': False
 }
 
