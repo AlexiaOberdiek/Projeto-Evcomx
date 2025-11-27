@@ -171,17 +171,6 @@ model_unique = XGBRegressor(**best_params)
 model_unique.fit(X_elite_final, Y_elite)
 
 # ==============================================================================
-# 7. CÁLCULO DO VIÉS
-# ==============================================================================
-# Comparação simples: O quanto o modelo errou na média no treino?
-p_tr_elite = model_unique.predict(X_elite_final)
-vies_calculado = np.mean(p_tr_elite - Y_elite)
-
-print(f"\n>>> VIÉS DETECTADO NA ELITE: {vies_calculado:.2f} °C")
-p_tr_sujo = model_unique.predict(X_dirty_final)
-vies_calculado = np.mean(p_tr_sujo - Y_dirty)
-print(f"\n>>> VIÉS DETECTADO NOS SUJOS: {vies_calculado:.2f} °C")
-# ==============================================================================
 # 8. FUNÇÃO DE AVALIAÇÃO COMPARATIVA (NOVO vs LEGADO)
 # ==============================================================================
 def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=False):
@@ -191,7 +180,7 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
     pred_raw = model_unique.predict(X_input)
     
     if usar_vies:
-        pred_final = pred_raw + vies_calculado
+        pred_final = pred_raw -1
     else:
         pred_final = pred_raw
         
