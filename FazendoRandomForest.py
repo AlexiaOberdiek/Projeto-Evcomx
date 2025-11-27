@@ -8,14 +8,15 @@ from sklearn.metrics import mean_squared_error
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
-
+import lightgbm as lgb
+from lightgbm import LGBMRegressor as LightGBMRegressor
 warnings.filterwarnings('ignore')
 
 # ==============================================================================
 # 1. CONFIGURAÇÕES
 # ==============================================================================
 TARGET = 'temperaturasaidafp'
-COLS_TO_EXCLUDE_FROM_X = ['sugestaomodelolegado', 'temperaturamediareal', 'temperaturaobjetivada'] 
+COLS_TO_EXCLUDE_FROM_X = ['sugestaomodelolegado', 'temperaturamediareal', 'temperaturaobjetivada', 'Desvio_Legado_Target'] 
 VAL_INICIO = 7000  
 DELTA_NEG = 5   
 DELTA_POS = 10  
@@ -54,8 +55,6 @@ for c in cat_features:
 
 df['C_Medio'] = (df['c_max'] + df['c_min']) / 2
 df['T_Liquid_Desvio'] = df['temperaturaobjetivada'] - df['temperaturaliquidus']
-df['Desvio_Legado_Target'] = df['sugestaomodelolegado'] - df['temperaturaobjetivada']
-df['Tempo_Sequencia'] = df['tempociclo'] * df['sequencia']
 
 cols_to_drop_early = ['acoatual','corrida','secao','c_min','c_max','s_min',
                       'temperaturaliquidus','velocidadeobjetivada','velocidadereal']
@@ -102,12 +101,14 @@ print("\n--- 3. Configurando o Stacking ---")
 # Nota: Adicionei Random Forest para dar diversidade (ajuda o Stacking)
 estimators = [
     ('xgb', XGBRegressor(
-        n_estimators=1000, learning_rate=0.05, max_depth=6,
+        n_estimators=840, learning_rate=0.05, max_depth=12,
+        subsample=0.6, colsample_bytree=0.72,
+        min_child_weight=8,alpha=1.4,
         objective=custom_asymmetric_loss_xgb, # XGB com sua perda
         n_jobs=-1, random_state=42
     )),
     ('cat', CatBoostRegressor(
-        iterations=1000, learning_rate=0.05, depth=6,
+        iterations=2000, learning_rate=0.05, depth=6,
         loss_function='RMSE', # Catboost vai de RMSE padrão
         verbose=0, random_seed=42, allow_writing_files=False
     )),
@@ -134,67 +135,96 @@ print("Treinando o Stacking (Isso pode demorar um pouco)...")
 stacking_model.fit(X_elite, Y_elite)
 
 # ==============================================================================
-# 7. CÁLCULO DE VIÉS E AVALIAÇÃO
+# 7. FUNÇÃO DE AVALIAÇÃO DETALHADA
 # ==============================================================================
-# Mesmo sendo um Stack, calculamos o viés final na Elite
-p_tr_elite = stacking_model.predict(X_elite)
-vies_calculado = np.mean(p_tr_elite - Y_elite)
-print(f"\n>>> VIÉS DO STACK NA ELITE: {vies_calculado:.2f} °C")
-
-def avaliar_cenario(X_input, df_orig, nome_dataset, usar_vies=False):
-    print(f"\n>>> AVALIANDO: {nome_dataset} ---")
+def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=False):
+    print(f"\n>>> AVALIANDO: {nome_dataset} (Correção: {usar_vies})")
     
+    # 1. Predição
     pred_raw = stacking_model.predict(X_input)
     
+    # 2. Correção de Viés
     if usar_vies:
-        pred_final = pred_raw - vies_calculado
+        # Se quiser forçar: pred_final = pred_raw - 1.5
+        pred_final = pred_raw - 0.5
     else:
         pred_final = pred_raw
         
-    # Erros
+    # 3. Cálculo dos Erros
+    # Legado
     diff_legado = df_orig['sugestaomodelolegado'] - df_orig[TARGET]
     erro_legado = (df_orig['temperaturamediareal'] + diff_legado) - df_orig['temperaturaobjetivada']
     
+    # Novo Modelo
     diff_novo = pred_final - df_orig[TARGET]
     erro_novo = (df_orig['temperaturamediareal'] + diff_novo) - df_orig['temperaturaobjetivada']
     
-    # Categorização (5 Faixas)
-    df_plot = pd.DataFrame({'Legado': erro_legado, 'Stacking': erro_novo})
+    # 4. Categorização
+    df_plot = pd.DataFrame({'Legado': erro_legado, 'Novo': erro_novo})
     
     def categorizar(val):
-        if val < -10: return '1. Extremo Frio'
-        elif val < -5: return '2. Frio'
-        elif val <= 10: return '3. Acerto'
-        elif val <= 20: return '4. Quente'
-        else: return '5. Extremo Calor'
+        if val < -15:           return '1. Extremo Frio (< -15)'
+        elif val >= -15 and val < -5: return '2. Frio (-15 a -5)'
+        elif val >= -5 and val <= 10: return '3. Acerto (-5 a +10)'
+        elif val > 10 and val <= 20:  return '4. Quente (+10 a +20)'
+        else:                   return '5. Extremo Calor (> +20)'
 
     df_plot['Cat_Legado'] = df_plot['Legado'].apply(categorizar)
-    df_plot['Cat_Novo'] = df_plot['Stacking'].apply(categorizar)
+    df_plot['Cat_Novo'] = df_plot['Novo'].apply(categorizar)
     
-    # Cálculo das porcentagens
-    cols_order = ['1. Extremo Frio', '2. Frio', '3. Acerto', '4. Quente', '5. Extremo Calor']
     stats_legado = df_plot['Cat_Legado'].value_counts(normalize=True) * 100
     stats_novo = df_plot['Cat_Novo'].value_counts(normalize=True) * 100
     
-    # Print Tabela
-    resumo = pd.DataFrame({'% Legado': stats_legado, '% Stacking': stats_novo}).reindex(cols_order).fillna(0)
+    # 5. Plotagem
+    fig, axes = plt.subplots(1, 2, figsize=(20, 7))
+    
+    # Histograma
+    sns.histplot(df_plot['Legado'], color='red', label='Legado', kde=True, ax=axes[0], alpha=0.3, element="step")
+    sns.histplot(df_plot['Novo'], color='green', label='CatBoost', kde=True, ax=axes[0], alpha=0.3, element="step")
+    axes[0].axvline(-5, color='green', linestyle='--', label='Meta')
+    axes[0].axvline(10, color='green', linestyle='--')
+    axes[0].axvline(-10, color='black', linestyle=':', label='Extremo')
+    axes[0].axvline(20, color='black', linestyle=':')
+    axes[0].set_title(f"Distribuição de Erros - {nome_dataset}")
+    axes[0].set_xlabel("Erro vs Objetivo (°C)")
+    axes[0].legend()
+    
+    # Barras
+    categorias = [
+        '1. Extremo Frio (< -15)', '2. Frio (-15 a -5)', 
+        '3. Acerto (-5 a +10)', 
+        '4. Quente (+10 a +20)', '5. Extremo Calor (> +20)'
+    ]
+    vals_leg = [stats_legado.get(c, 0) for c in categorias]
+    vals_nov = [stats_novo.get(c, 0) for c in categorias]
+    x = np.arange(len(categorias))
+    
+    bars1 = axes[1].bar(x - 0.17, vals_leg, 0.35, label='Legado', color='red', alpha=0.7)
+    bars2 = axes[1].bar(x + 0.17, vals_nov, 0.35, label='CatBoost', color='green', alpha=0.7)
+    
+    axes[1].set_title(f"Comparação - {nome_dataset}")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(['EXT. FRIO', 'Frio', 'ACERTO', 'Quente', 'EXT. CALOR'], fontsize=10)
+    axes[1].bar_label(bars1, fmt='%.1f%%', padding=3, fontsize=9)
+    axes[1].bar_label(bars2, fmt='%.1f%%', padding=3, fontsize=9)
+    axes[1].legend()
+    
+    plt.tight_layout(); plt.show()
+    
+    resumo = pd.DataFrame({'% Legado': vals_leg, '% Novo': vals_nov}, index=categorias)
+    print(f"--- Resumo Numérico: {nome_dataset} ---")
     print(resumo.round(2))
-    
-    # Plotagem Simplificada
-    fig, ax = plt.subplots(figsize=(12, 5))
-    x = np.arange(len(cols_order))
-    width = 0.35
-    
-    ax.bar(x - width/2, resumo['% Legado'], width, label='Legado', color='red', alpha=0.7)
-    ax.bar(x + width/2, resumo['% Stacking'], width, label='Stacking', color='purple', alpha=0.7)
-    
-    ax.set_xticks(x)
-    ax.set_xticklabels(['Ext. Frio', 'Frio', 'ACERTO', 'Quente', 'Ext. Calor'])
-    ax.set_title(f"Performance: {nome_dataset}")
-    ax.legend()
-    plt.show()
+    print("="*60)
 
-# EXECUÇÃO
-avaliar_cenario(X_elite, df_treino_gold, "1. ELITE (Sem Viés)", False)
-avaliar_cenario(X_dirty, df_treino_dirty, "2. SUJOS (Com Viés)", True)
-avaliar_cenario(X_valid, df_valid, "3. VALIDAÇÃO (Com Viés)", True)
+# ==============================================================================
+# 8. EXECUÇÃO
+# ==============================================================================
+
+avaliar_cenario_unico(X_elite, df_treino_gold, Y_elite, 
+                      "1. TREINO ELITE (Sem Viés)", usar_vies=False)
+
+avaliar_cenario_unico(X_dirty, df_treino_dirty, Y_dirty, 
+                      "2. DADOS SUJOS (Com Correção)", usar_vies=True)
+
+avaliar_cenario_unico(X_valid, df_valid, Y_valid, 
+                      "3. VALIDAÇÃO FUTURA (Com Correção)", usar_vies=True)

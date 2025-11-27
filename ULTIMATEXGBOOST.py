@@ -64,8 +64,6 @@ for c in id_cols:
 # FE (Apenas dados físicos/químicos, sem olhar pro legado)
 df['C_Medio'] = (df['c_max'] + df['c_min']) / 2
 df['T_Liquid_Desvio'] = df['temperaturaobjetivada'] - df['temperaturaliquidus']
-# REMOVIDO: df['Desvio_Legado_Target'] (Para criar independência)
-df['Tempo_Sequencia'] = df['tempociclo'] * df['sequencia']
 
 cols_to_drop_early = ['acoatual','corrida','secao','c_min','c_max','s_min',
                       'temperaturaliquidus','velocidadeobjetivada','velocidadereal']
@@ -180,7 +178,7 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
     pred_raw = model_unique.predict(X_input)
     
     if usar_vies:
-        pred_final = pred_raw -1
+        pred_final = pred_raw -0.5
     else:
         pred_final = pred_raw
         
@@ -202,8 +200,8 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
         if val < -15:           return '1. Extremo Frio (< -15)'
         elif val >= -15 and val < -5: return '2. Frio (-15 a -5)'
         elif val >= -5 and val <= 10: return '3. Acerto (-5 a +10)'
-        elif val > 10 and val <= 25:  return '4. Quente (+10 a +25)'
-        else:                   return '5. Extremo Calor (> +25)'
+        elif val > 10 and val <= 20:  return '4. Quente (+10 a +20)'
+        else:                   return '5. Extremo Calor (> +20)'
 
     df_plot['Cat_Legado'] = df_plot['Legado'].apply(categorizar)
     df_plot['Cat_Novo'] = df_plot['Novo'].apply(categorizar)
@@ -229,7 +227,7 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
     categorias = [
         '1. Extremo Frio (< -15)', '2. Frio (-15 a -5)', 
         '3. Acerto (-5 a +10)', 
-        '4. Quente (+10 a +25)', '5. Extremo Calor (> +25)'
+        '4. Quente (+10 a +20)', '5. Extremo Calor (> +20)'
     ]
     vals_leg = [stats_legado.get(c, 0) for c in categorias]
     vals_nov = [stats_novo.get(c, 0) for c in categorias]

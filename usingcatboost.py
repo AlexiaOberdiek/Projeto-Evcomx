@@ -46,7 +46,7 @@ for c in id_cols:
 
 df['C_Medio'] = (df['c_max'] + df['c_min']) / 2
 df['T_Liquid_Desvio'] = df['temperaturaobjetivada'] - df['temperaturaliquidus']
-df['Tempo_Sequencia'] = df['tempociclo'] * df['sequencia']
+#df['Tempo_Sequencia'] = df['tempociclo'] * df['sequencia']
 
 cols_to_drop_early = ['acoatual','corrida','secao','c_min','c_max','s_min',
                       'temperaturaliquidus','velocidadeobjetivada','velocidadereal']
@@ -139,8 +139,8 @@ params = {
     'loss_function': 'RMSE', # <--- MUDANÇA CRÍTICA: Volta para o estável
     'random_seed': 42,
     'verbose': 500,
-    'allow_writing_files': False
-    # 'task_type': 'GPU' # Se tiver GPU NVIDIA, descomente
+    'allow_writing_files': False,
+    'task_type': 'GPU' # Se tiver GPU NVIDIA, descomente
 }
 
 print("\n--- 4. Treinando Modelo Único (CatBoost) ---")
