@@ -112,15 +112,6 @@ model_unique = CatBoostRegressor(**params)
 model_unique.fit(X_elite, Y_elite, cat_features=cat_features)
 
 # ==============================================================================
-# 5. CÁLCULO DO VIÉS (CALIBRAÇÃO)
-# ==============================================================================
-# Predição na Elite para calcular a calibração
-p_tr_elite = model_unique.predict(X_elite)
-vies_calculado = np.mean(p_tr_elite - Y_elite)
-
-print(f"\n>>> VIÉS DETECTADO NA ELITE: {vies_calculado:.2f} °C")
-
-# ==============================================================================
 # 8. FUNÇÃO DE AVALIAÇÃO DETALHADA (5 FAIXAS)
 # ==============================================================================
 def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=False):
@@ -131,7 +122,7 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
     
     # 2. Correção de Viés
     if usar_vies:
-        pred_final = pred_raw - vies_calculado
+        pred_final = pred_raw - 1
     else:
         pred_final = pred_raw
         
