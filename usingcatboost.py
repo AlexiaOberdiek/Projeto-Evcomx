@@ -46,7 +46,7 @@ for c in id_cols:
 
 df['C_Medio'] = (df['c_max'] + df['c_min']) / 2
 df['T_Liquid_Desvio'] = df['temperaturaobjetivada'] - df['temperaturaliquidus']
-#df['Tempo_Sequencia'] = df['tempociclo'] * df['sequencia']
+
 
 cols_to_drop_early = ['acoatual','corrida','secao','c_min','c_max','s_min',
                       'temperaturaliquidus','velocidadeobjetivada','velocidadereal']
@@ -160,7 +160,7 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
     # 2. Correção de Viés
     if usar_vies:
         # Se quiser forçar: pred_final = pred_raw - 1.5
-        pred_final = pred_raw - 0.5
+        pred_final = pred_raw + 0.75
     else:
         pred_final = pred_raw
         
