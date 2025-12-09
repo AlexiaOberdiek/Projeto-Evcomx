@@ -15,14 +15,13 @@ LIMITE_USOU = 5
 DELTA_NEG = 5   
 DELTA_POS = 10  
 
-# --- PALETA DE CORES SEMÂNTICA ---
-# Aqui definimos a "Cara" do gráfico
+# --- PALETA DE CORES SEMÂNTICA (ATUALIZADA PARA -15) ---
 CORES_FAIXAS = {
-    '1. Extremo Frio (< -10)': '#003366', # Azul Marinho (Congelando)
-    '2. Frio (-10 a -5)':      '#4287f5', # Azul Claro (Frio)
-    '3. Acerto (-5 a +10)':    '#28a745', # Verde (Sucesso)
-    '4. Quente (+10 a +20)':   '#fd7e14', # Laranja (Quente)
-    '5. Extremo Calor (> +20)': '#dc3545' # Vermelho (Fogo)
+    '1. Extremo Frio (< -15)': '#003366', # Azul Marinho
+    '2. Frio (-15 a -5)':      '#4287f5', # Azul Claro
+    '3. Acerto (-5 a +10)':    '#28a745', # Verde
+    '4. Quente (+10 a +20)':   '#fd7e14', # Laranja
+    '5. Extremo Calor (> +20)': '#dc3545' # Vermelho
 }
 
 # ==============================================================================
@@ -40,46 +39,31 @@ df['diff_uso'] = (df['sugestaomodelolegado'] - df['temperaturasaidafp']).abs()
 df['quem_operou'] = np.where(df['diff_uso'] <= LIMITE_USOU, 'Legado (Seguiu)', 'Operador (Interviu)')
 
 print(f"Total de Corridas: {len(df)}")
+
+# GRÁFICO DE PIZZA (ADESÃO)
 def plotar_pizza_adesao(df_input):
-    # Contagem
     counts = df_input['quem_operou'].value_counts()
-    
-    # Definição de Cores (Para bater com os gráficos de histograma abaixo)
-    # Azul = Legado, Laranja = Operador
     cores_map = {'Legado (Seguiu)': 'blue', 'Operador (Interviu)': 'orange'}
     lista_cores = [cores_map.get(x, 'gray') for x in counts.index]
-    
-    # Destacar a fatia menor (Explode)
     explode = [0.05] * len(counts)
 
-    # Plotagem
     plt.figure(figsize=(10, 7))
     wedges, texts, autotexts = plt.pie(
-        counts, 
-        labels=counts.index, 
-        autopct='%1.1f%%', 
-        startangle=140,
-        colors=lista_cores, 
-        explode=explode, 
-        shadow=True,
-        textprops=dict(color="black")
+        counts, labels=counts.index, autopct='%1.1f%%', startangle=140,
+        colors=lista_cores, explode=explode, shadow=True, textprops=dict(color="black")
     )
-    
-    # Estilização dos textos
     plt.setp(texts, size=12, weight="bold")
     plt.setp(autotexts, size=14, weight="bold", color="white")
-    
     plt.title("Taxa de Adesão: Quantas vezes o Legado foi seguido?", fontsize=16, fontweight='bold')
-    plt.axis('equal') # Garante círculo perfeito
+    plt.axis('equal')
     plt.tight_layout()
     plt.show()
-    
     print("\n>>> ESTATÍSTICAS DE ADESÃO")
     print(counts)
     print("-" * 60)
 
-# Chama a função da pizza agora
 plotar_pizza_adesao(df)
+
 # ==============================================================================
 # 3. FUNÇÕES DE CÁLCULO
 # ==============================================================================
@@ -91,13 +75,14 @@ def get_erro_legado_simulado(df_input):
     return (df_input['temperaturamediareal'] + diff_legado) - df_input['temperaturaobjetivada']
 
 # ==============================================================================
-# 4. FUNÇÃO DE PLOTAGEM (VISUAL MELHORADO)
+# 4. FUNÇÃO DE PLOTAGEM (ATUALIZADA PARA -15)
 # ==============================================================================
 def plotar_cenario(series_erro, titulo, cor_histograma):
-    # 1. Categorizar
+    
+    # 1. Categorizar (Com limite -15)
     def categorizar(val):
-        if val < -10:           return '1. Extremo Frio (< -10)'
-        elif val >= -10 and val < -5: return '2. Frio (-10 a -5)'
+        if val < -15:           return '1. Extremo Frio (< -15)'
+        elif val >= -15 and val < -5: return '2. Frio (-15 a -5)'
         elif val >= -5 and val <= 10: return '3. Acerto (-5 a +10)'
         elif val > 10 and val <= 20:  return '4. Quente (+10 a +20)'
         else:                   return '5. Extremo Calor (> +20)'
@@ -106,59 +91,53 @@ def plotar_cenario(series_erro, titulo, cor_histograma):
     stats = cats.value_counts(normalize=True) * 100
     
     # Ordem fixa
-    ordem = ['1. Extremo Frio (< -10)', '2. Frio (-10 a -5)', '3. Acerto (-5 a +10)', '4. Quente (+10 a +20)', '5. Extremo Calor (> +20)']
+    ordem = ['1. Extremo Frio (< -15)', '2. Frio (-15 a -5)', '3. Acerto (-5 a +10)', '4. Quente (+10 a +20)', '5. Extremo Calor (> +20)']
     valores = [stats.get(c, 0) for c in ordem]
     
-    # Prepara lista de cores para as barras
+    # Cores corretas para as barras
     lista_cores = [CORES_FAIXAS[cat] for cat in ordem]
     
-    # Labels curtos para o eixo X
-    labels_x = ['Ext. Frio\n(< -10)', 'Frio\n(-10 a -5)', 'ACERTO\n(-5 a +10)', 'Quente\n(+10 a +20)', 'Ext. Calor\n(> +20)']
+    labels_x = ['Ext. Frio\n(< -15)', 'Frio\n(-15 a -5)', 'ACERTO\n(-5 a +10)', 'Quente\n(+10 a +20)', 'Ext. Calor\n(> +20)']
 
     # --- PLOTAGEM ---
     fig, axes = plt.subplots(1, 2, figsize=(20, 7))
     
-    # GRÁFICO 1: DISTRIBUIÇÃO (Histograma)
-    # Mantemos uma cor única aqui para representar o cenário (ex: Laranja para Operador)
+    # GRÁFICO 1: DISTRIBUIÇÃO
     sns.histplot(series_erro, color=cor_histograma, kde=True, ax=axes[0], element="step", alpha=0.5)
     
-    # Linhas de referência coloridas
     axes[0].axvline(-5, color=CORES_FAIXAS['3. Acerto (-5 a +10)'], linestyle='--', linewidth=2, label='Meta (-5)')
     axes[0].axvline(10, color=CORES_FAIXAS['3. Acerto (-5 a +10)'], linestyle='--', linewidth=2, label='Meta (+10)')
-    axes[0].axvline(-10, color=CORES_FAIXAS['1. Extremo Frio (< -10)'], linestyle=':', linewidth=2, label='Crítico Frio')
+    
+    # ATUALIZAÇÃO DA LINHA CRÍTICA (-15)
+    axes[0].axvline(-15, color=CORES_FAIXAS['1. Extremo Frio (< -15)'], linestyle=':', linewidth=2, label='Crítico Frio (-15)')
     axes[0].axvline(20, color=CORES_FAIXAS['5. Extremo Calor (> +20)'], linestyle=':', linewidth=2, label='Crítico Calor')
-    axes[0].set_title(f'Distribuição do Erro de Temperatura - {titulo}', fontsize=14)
-    axes[0].set_xlabel("Erro em relação ao Objetivo (°C)", fontsize=12)
+    
+    axes[0].set_title(f"Distribuição: {titulo}", fontsize=14)
+    axes[0].set_xlabel("Erro (°C)", fontsize=12)
     axes[0].set_xlim(-50, 50)
     axes[0].grid(True, alpha=0.2)
     axes[0].legend()
 
-    # GRÁFICO 2: BARRAS COLORIDAS
+    # GRÁFICO 2: BARRAS
     bars = axes[1].bar(labels_x, valores, color=lista_cores, alpha=0.85, edgecolor='black')
-    
     axes[1].set_title(f"Classificação: {titulo}", fontsize=14)
     axes[1].set_ylabel("% das Corridas", fontsize=12)
-    
-    # Adiciona os valores em cima das barras
     axes[1].bar_label(bars, fmt='%.1f%%', padding=3, fontsize=11, fontweight='bold')
     
-    # --- LEGENDA PERSONALIZADA ---
-    # Cria "manchas" de cor para a legenda explicar o que é cada cor
+    # LEGENDA ATUALIZADA
     legend_elements = [
-        Patch(facecolor=CORES_FAIXAS['1. Extremo Frio (< -10)'], label='Perda Total (< -10°C)'),
-        Patch(facecolor=CORES_FAIXAS['2. Frio (-10 a -5)'],      label='Risco Operacional (-10 a -5°C)'),
+        Patch(facecolor=CORES_FAIXAS['1. Extremo Frio (< -15)'], label='Perda Total (< -15°C)'),
+        Patch(facecolor=CORES_FAIXAS['2. Frio (-15 a -5)'],      label='Risco Operacional (-15 a -5°C)'),
         Patch(facecolor=CORES_FAIXAS['3. Acerto (-5 a +10)'],    label='META Atingida'),
         Patch(facecolor=CORES_FAIXAS['4. Quente (+10 a +20)'],   label='Desperdício (+10 a +20°C)'),
         Patch(facecolor=CORES_FAIXAS['5. Extremo Calor (> +20)'], label='Dano ao Refratário (> +20°C)'),
     ]
-    
-    axes[1].legend(handles=legend_elements, loc='upper right', title="Legenda de Cores")
+    axes[1].legend(handles=legend_elements, loc='upper right', title="Legenda")
     axes[1].grid(axis='y', alpha=0.2)
 
     plt.tight_layout()
     plt.show()
     
-    # Print Resumo
     print(f"\n>>> {titulo}")
     print(f"Média do Erro: {series_erro.mean():.2f}°C")
     print("-" * 60)
@@ -167,24 +146,21 @@ def plotar_cenario(series_erro, titulo, cor_histograma):
 # 5. EXECUÇÃO
 # ==============================================================================
 
-# 1. QUANDO O OPERADOR SEGUIU O LEGADO
+# 1. Operador SEGUIU
 df_seguiu = df[df['quem_operou'] == 'Legado (Seguiu)']
-erro_cenario_1 = get_erro_real(df_seguiu)
-plotar_cenario(erro_cenario_1, "Cenário 1: Operador SEGUIU o Legado", "blue")
+plotar_cenario(get_erro_real(df_seguiu), "Cenário 1: Operador SEGUIU o Legado", "blue")
 
-# 2. QUANDO O OPERADOR INTERVIU (Realidade)
+# 2. Operador INTERVIU (Realidade)
 df_interviu = df[df['quem_operou'] == 'Operador (Interviu)']
-erro_cenario_2 = get_erro_real(df_interviu)
-plotar_cenario(erro_cenario_2, "Cenário 2: Operador INTERVIU (O que aconteceu)", "orange")
+plotar_cenario(get_erro_real(df_interviu), "Cenário 2: Operador INTERVIU (Realidade)", "orange")
 
-# 3. QUANDO O OPERADOR INTERVIU (Se ele tivesse usado o Legado)
+# 3. Operador INTERVIU (Se usasse Legado)
 erro_cenario_3 = get_erro_legado_simulado(df_interviu)
-plotar_cenario(erro_cenario_3, "Cenário 3: E se o Operador NÃO tivesse intervindo?", "purple")
+plotar_cenario(erro_cenario_3, "Cenário 3: E se tivessem usado o Legado na Intervenção?", "purple")
 
-# 4. REALIDADE TOTAL (Histórico Completo)
-erro_cenario_4 = get_erro_real(df)
-plotar_cenario(erro_cenario_4, "Cenário 4: Histórico Total da Fábrica", "gray")
+# 4. Histórico TOTAL
+plotar_cenario(get_erro_real(df), "Cenário 4: Realidade Total da Fábrica", "gray")
 
-# 5. LEGADO PURO (Simulação Total)
+# 5. Legado PURO (Total)
 erro_cenario_5 = get_erro_legado_simulado(df)
 plotar_cenario(erro_cenario_5, "Cenário 5: Simulação (Se usasse 100% Legado)", "red")

@@ -28,6 +28,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
+
 # ==============================================================================
 # 1. CONFIGURAÇÕES
 # ==============================================================================
@@ -41,6 +42,16 @@ VAL_INICIO = 7000
 LIMITE_USOU = 5
 DELTA_NEG = 5
 DELTA_POS = 10
+# ==============================================================================
+# 2. FUNÇÃO DE PERDA (XGBOOST)
+# ==============================================================================
+def custom_asymmetric_loss(y_true, y_pred):
+    resid = y_pred - y_true
+    alpha = 1.3
+    factor = np.where(resid < 0, alpha, 1.0)
+    grad = 2.0 * resid * factor
+    hess = 2.0 * factor
+    return grad, hess
 
 # ==============================================================================
 # 2. CARREGAMENTO E PREPARAÇÃO
@@ -182,19 +193,13 @@ X_dirty_final = outputs[2]  # Dados Sujos prontos
 # 5. TREINO (RANDOM FOREST)
 # ==============================================================================
 best_params = {
-    'n_estimators': 1500, # Um pouco mais de árvores para compensar a unificação
-    'learning_rate': 0.10,
-    'max_depth': 8,
-    'subsample': 0.7,
-    'colsample_bytree': 0.7,
-    'min_child_weight': 15,
-    'reg_lambda': 0.01,
-    'alpha': 0.01,
-    "booster": "dart",
+    'n_estimators': 1500, 'learning_rate': 0.10, 'max_depth': 8, 
+    'subsample': 0.7, 'colsample_bytree': 0.7, 'min_child_weight': 15, 
+    'reg_lambda': 0.01, 'alpha': 0.01, 
+    "objective": custom_asymmetric_loss, "booster": "gbtree",
     "tree_method": "hist", "device": "cuda", "random_state": 42,
     "verbosity": 0, "n_jobs": -1
 }
-
 base_models = [
 
     # 2. LightGBM
@@ -255,94 +260,221 @@ model_unique = LGBMRegressor(
 model_unique.fit(X_elite_final, Y_elite)
 
 # ==============================================================================
-# 7. FUNÇÃO DE AVALIAÇÃO DETALHADA (5 FAIXAS)
+# 8. FUNÇÃO DE AVALIAÇÃO (CORRIGIDA - BINS DINÂMICOS)
 # ==============================================================================
 def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=False):
     print(f"\n>>> AVALIANDO: {nome_dataset} (Correção: {usar_vies})")
-
-    # 1. Predição Única
+    
+    # 1. Predição
     pred_raw = model_unique.predict(X_input)
-    # 2. Aplicação do Viés
+    
+    # 2. Correção de Viés
     if usar_vies:
-        # Se quiser testar manual: pred_final = pred_raw - 1.5
         pred_final = pred_raw +0.75
     else:
         pred_final = pred_raw
-
-    # 3. Cálculo dos Erros (Fórmula Complexa)
-    # Legado
+        
+    # 3. Cálculo dos Erros
     diff_legado = df_orig['sugestaomodelolegado'] - df_orig[TARGET]
     erro_legado = (df_orig['temperaturamediareal'] + diff_legado) - df_orig['temperaturaobjetivada']
-
-    # Novo Modelo
+    
     diff_novo = pred_final - df_orig[TARGET]
     erro_novo = (df_orig['temperaturamediareal'] + diff_novo) - df_orig['temperaturaobjetivada']
+    
+    # ==========================================================================
+    # PARTE A: GRÁFICO DE CONTINUIDADE (LINHA DO TEMPO INTELIGENTE)
+    # ==========================================================================
+    # Só plota se tiver dados suficientes
+    if len(df_orig) > 50:
+        print("... Gerando Gráfico de Continuidade ...")
+        df_timeline = df_orig.copy().reset_index(drop=True)
+        
+        # Flags
+        df_timeline['Legado_Acerto'] = ((erro_legado >= -DELTA_NEG) & (erro_legado <= DELTA_POS)).astype(int)
+        df_timeline['Novo_Acerto']   = ((erro_novo >= -DELTA_NEG) & (erro_novo <= DELTA_POS)).astype(int)
+        df_timeline['Legado_Frio']   = (erro_legado < -DELTA_NEG).astype(int)
+        df_timeline['Novo_Frio']     = (erro_novo < -DELTA_NEG).astype(int)
+        df_timeline['Legado_Quente'] = (erro_legado > DELTA_POS).astype(int)
+        df_timeline['Novo_Quente']   = (erro_novo > DELTA_POS).astype(int)
 
-    # 4. Categorização (5 Faixas)
+        # >>> CORREÇÃO AQUI: BINNING DINÂMICO <<<
+        total_linhas = len(df_timeline)
+        
+        if total_linhas < 1000:
+            bin_size = 50  # Para Validação (pequeno): Zoom de 50 em 50
+        else:
+            bin_size = 500 # Para Histórico (grande): Visão macro de 500 em 500
+            
+        bins = list(range(0, total_linhas + bin_size, bin_size))
+        labels = [f"{b}-{b+bin_size}" for b in bins[:-1]]
+        
+        # Cria as faixas
+        df_timeline['Faixa_Corridas'] = pd.cut(df_timeline.index, bins=bins, labels=labels)
+
+        # Agrupa
+        df_grouped = df_timeline.groupby('Faixa_Corridas')[
+            ['Legado_Acerto', 'Novo_Acerto', 'Legado_Frio', 'Novo_Frio', 'Legado_Quente', 'Novo_Quente']
+        ].mean() * 100
+        
+        df_grouped = df_grouped.dropna()
+
+        # Só plota se tivermos pelo menos 2 pontos para formar uma linha
+        if len(df_grouped) > 1:
+            sns.set_style("whitegrid")
+            fig, axes = plt.subplots(3, 1, figsize=(16, 12), sharex=True)
+            cor_legado = 'tab:red'
+            cor_novo = 'tab:green' 
+
+            # Gráfico 1
+            axes[0].plot(df_grouped.index, df_grouped['Legado_Acerto'], marker='o', linestyle='--', color=cor_legado, label='Legado')
+            axes[0].plot(df_grouped.index, df_grouped['Novo_Acerto'], marker='o', linestyle='-', color=cor_novo, label='Novo Modelo', linewidth=3)
+            axes[0].set_ylabel('Taxa de Acerto (%)')
+            axes[0].set_title(f'1. Evolução da Taxa de Acerto - {nome_dataset}', fontsize=14, fontweight='bold')
+            axes[0].legend()
+            
+            # O fill_between agora vai funcionar porque tem múltiplos pontos
+            try:
+                axes[0].fill_between(df_grouped.index, df_grouped['Legado_Acerto'], df_grouped['Novo_Acerto'], 
+                                     where=(df_grouped['Novo_Acerto'] > df_grouped['Legado_Acerto']), color='green', alpha=0.1, interpolate=True)
+            except:
+                pass # Se der erro no fill (indices complexos), apenas ignora e mostra as linhas
+
+            # Gráfico 2
+            axes[1].plot(df_grouped.index, df_grouped['Legado_Frio'], marker='x', linestyle=':', color=cor_legado, label='Legado')
+            axes[1].plot(df_grouped.index, df_grouped['Novo_Frio'], marker='x', linestyle='-', color=cor_novo, label='Novo Modelo')
+            axes[1].set_ylabel('% Frio (< -5°C)')
+            axes[1].set_title('2. Risco de Aço Frio', fontsize=12)
+
+            # Gráfico 3
+            axes[2].plot(df_grouped.index, df_grouped['Legado_Quente'], marker='s', linestyle=':', color=cor_legado, label='Legado')
+            axes[2].plot(df_grouped.index, df_grouped['Novo_Quente'], marker='s', linestyle='-', color=cor_novo, label='Novo Modelo')
+            axes[2].set_ylabel('% Quente (> +10°C)')
+            axes[2].set_title('3. Tendência de Superaquecimento', fontsize=12)
+            
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.show()
+        else:
+            print(">>> Aviso: Dados insuficientes para gerar gráfico de linha do tempo (menos de 2 faixas).")
+    
+    # ==========================================================================
+    # PARTE B: GRÁFICO DE BARRAS (5 CATEGORIAS)
+    # ==========================================================================
+    print("... Gerando Gráfico de Distribuição ...")
+    
     df_plot = pd.DataFrame({'Legado': erro_legado, 'Novo': erro_novo})
-
+    
     def categorizar(val):
-        if val < -15:           return '1. Extremo Frio (< -15)'
-        elif val >= -15 and val < -5: return '2. Frio (-15 a -5)'
+        if val < -10:           return '1. Extremo Frio (< -10)'
+        elif val >= -10 and val < -5: return '2. Frio (-10 a -5)'
         elif val >= -5 and val <= 10: return '3. Acerto (-5 a +10)'
         elif val > 10 and val <= 20:  return '4. Quente (+10 a +20)'
         else:                   return '5. Extremo Calor (> +20)'
 
     df_plot['Cat_Legado'] = df_plot['Legado'].apply(categorizar)
     df_plot['Cat_Novo'] = df_plot['Novo'].apply(categorizar)
-
+    
     stats_legado = df_plot['Cat_Legado'].value_counts(normalize=True) * 100
     stats_novo = df_plot['Cat_Novo'].value_counts(normalize=True) * 100
-
-    # 5. Plotagem
+    
     fig, axes = plt.subplots(1, 2, figsize=(20, 7))
-
-    # --- GRÁFICO 1: HISTOGRAMA ---
+    
+    # Histograma
     sns.histplot(df_plot['Legado'], color='red', label='Legado', kde=True, ax=axes[0], alpha=0.3, element="step")
-    sns.histplot(df_plot['Novo'], color='green', label='Random Forest', kde=True, ax=axes[0], alpha=0.3, element="step")
-
-    axes[0].axvline(-5, color='black', linestyle='--', linewidth=2, label='Meta (-5)')
-    axes[0].axvline(10, color='black', linestyle='--', linewidth=2, label='Meta (+10)')
-    axes[0].axvline(-10, color='red', linestyle=':', linewidth=2)
-    axes[0].axvline(20, color='red', linestyle=':', linewidth=2)
-
+    sns.histplot(df_plot['Novo'], color='green', label='Novo Modelo', kde=True, ax=axes[0], alpha=0.3, element="step")
+    axes[0].axvline(-5, color='green', linestyle='--', label='Meta')
+    axes[0].axvline(10, color='green', linestyle='--')
+    axes[0].axvline(-10, color='black', linestyle=':', label='Extremo')
+    axes[0].axvline(20, color='black', linestyle=':')
     axes[0].set_title(f"Distribuição de Erros - {nome_dataset}")
-    axes[0].set_xlabel("Desvio do Objetivo (°C)")
     axes[0].legend()
-
-    # --- GRÁFICO 2: BARRAS (5 CATEGORIAS) ---
+    
+    # Barras
     categorias = [
-        '1. Extremo Frio (< -15)',
-        '2. Frio (-15 a -5)',
-        '3. Acerto (-5 a +10)',
-        '4. Quente (+10 a +20)',
-        '5. Extremo Calor (> +20)'
+        '1. Extremo Frio (< -10)', '2. Frio (-10 a -5)', 
+        '3. Acerto (-5 a +10)', 
+        '4. Quente (+10 a +20)', '5. Extremo Calor (> +20)'
     ]
-
     vals_leg = [stats_legado.get(c, 0) for c in categorias]
     vals_nov = [stats_novo.get(c, 0) for c in categorias]
     x = np.arange(len(categorias))
-
+    
     bars1 = axes[1].bar(x - 0.17, vals_leg, 0.35, label='Legado', color='red', alpha=0.7)
-    bars2 = axes[1].bar(x + 0.17, vals_nov, 0.35, label='Random Forest', color='green', alpha=0.7)
-
-    axes[1].set_title(f"Comparação Detalhada - {nome_dataset}")
+    bars2 = axes[1].bar(x + 0.17, vals_nov, 0.35, label='Novo Modelo', color='green', alpha=0.7)
+    
+    axes[1].set_title(f"Comparação - {nome_dataset}")
     axes[1].set_xticks(x)
     axes[1].set_xticklabels(['EXT. FRIO', 'Frio', 'ACERTO', 'Quente', 'EXT. CALOR'], fontsize=10)
-
     axes[1].bar_label(bars1, fmt='%.1f%%', padding=3, fontsize=9)
     axes[1].bar_label(bars2, fmt='%.1f%%', padding=3, fontsize=9)
     axes[1].legend()
-
+    
     plt.tight_layout()
     plt.show()
-
-    # 6. Tabela Resumo
+    
     resumo = pd.DataFrame({'% Legado': vals_leg, '% Novo': vals_nov}, index=categorias)
     print(f"--- Resumo Numérico: {nome_dataset} ---")
     print(resumo.round(2))
     print("="*60)
+    # ==========================================================================
+    # PARTE B: GRÁFICO DE BARRAS (5 CATEGORIAS) E HISTOGRAMA
+    # ==========================================================================
+    print("... Gerando Gráfico de Distribuição ...")
+    
+    df_plot = pd.DataFrame({'Legado': erro_legado, 'Novo': erro_novo})
+    
+    def categorizar(val):
+        if val < -10:           return '1. Extremo Frio (< -10)'
+        elif val >= -10 and val < -5: return '2. Frio (-10 a -5)'
+        elif val >= -5 and val <= 10: return '3. Acerto (-5 a +10)'
+        elif val > 10 and val <= 20:  return '4. Quente (+10 a +20)'
+        else:                   return '5. Extremo Calor (> +20)'
 
+    df_plot['Cat_Legado'] = df_plot['Legado'].apply(categorizar)
+    df_plot['Cat_Novo'] = df_plot['Novo'].apply(categorizar)
+    
+    stats_legado = df_plot['Cat_Legado'].value_counts(normalize=True) * 100
+    stats_novo = df_plot['Cat_Novo'].value_counts(normalize=True) * 100
+    
+    fig, axes = plt.subplots(1, 2, figsize=(20, 7))
+    
+    # Histograma
+    sns.histplot(df_plot['Legado'], color='red', label='Legado', kde=True, ax=axes[0], alpha=0.3, element="step")
+    sns.histplot(df_plot['Novo'], color='green', label='Novo Modelo', kde=True, ax=axes[0], alpha=0.3, element="step")
+    axes[0].axvline(-5, color='green', linestyle='--', label='Meta')
+    axes[0].axvline(10, color='green', linestyle='--')
+    axes[0].axvline(-10, color='black', linestyle=':', label='Extremo')
+    axes[0].axvline(20, color='black', linestyle=':')
+    axes[0].set_title(f"Distribuição de Erros - {nome_dataset}")
+    axes[0].legend()
+    
+    # Barras
+    categorias = [
+        '1. Extremo Frio (< -10)', '2. Frio (-10 a -5)', 
+        '3. Acerto (-5 a +10)', 
+        '4. Quente (+10 a +20)', '5. Extremo Calor (> +20)'
+    ]
+    vals_leg = [stats_legado.get(c, 0) for c in categorias]
+    vals_nov = [stats_novo.get(c, 0) for c in categorias]
+    x = np.arange(len(categorias))
+    
+    bars1 = axes[1].bar(x - 0.17, vals_leg, 0.35, label='Legado', color='red', alpha=0.7)
+    bars2 = axes[1].bar(x + 0.17, vals_nov, 0.35, label='Novo Modelo', color='green', alpha=0.7)
+    
+    axes[1].set_title(f"Comparação - {nome_dataset}")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(['EXT. FRIO', 'Frio', 'ACERTO', 'Quente', 'EXT. CALOR'], fontsize=10)
+    axes[1].bar_label(bars1, fmt='%.1f%%', padding=3, fontsize=9)
+    axes[1].bar_label(bars2, fmt='%.1f%%', padding=3, fontsize=9)
+    axes[1].legend()
+    
+    plt.tight_layout()
+    plt.show()
+    
+    resumo = pd.DataFrame({'% Legado': vals_leg, '% Novo': vals_nov}, index=categorias)
+    print(f"--- Resumo Numérico: {nome_dataset} ---")
+    print(resumo.round(2))
+    print("="*60)
 # ==============================================================================
 # 8. EXECUÇÃO
 # ==============================================================================
