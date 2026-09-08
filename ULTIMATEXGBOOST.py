@@ -11,8 +11,6 @@ import warnings
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.tools.tools import add_constant
 
-warnings.filterwarnings('ignore')
-
 # ==============================================================================
 # 1. CONFIGURAÇÕES
 # ==============================================================================
@@ -41,9 +39,8 @@ def custom_asymmetric_loss(y_true, y_pred):
     return grad, hess
 
 # ==============================================================================
-# 3. CARREGAMENTO E FE
+# 3. CARREGAMENTO E Feature Engineering 
 # ==============================================================================
-print("--- 1. Carregando Dados ---")
 df = pd.read_csv('dados_fundo_do_amanha_evcomx.csv', delimiter=';')
 df = df.drop_duplicates(subset=['corrida'], keep='first')
 
@@ -58,6 +55,7 @@ id_cols = ['corrida','secao','acoatual','qualidade','panela']
 for c in id_cols:
     if c in df.columns: df[c] = df[c].fillna('MISSING').astype(str)
 
+# Variáveis criadas
 df['C_Medio'] = (df['c_max'] + df['c_min']) / 2
 df['T_Liquid_Desvio'] = df['temperaturaobjetivada'] - df['temperaturaliquidus']
 
@@ -69,15 +67,14 @@ df_clean = df.drop(columns=[c for c in cols_to_drop_early if c in df.columns], e
 # ==============================================================================
 # 4. SPLIT GOLDEN BATCH
 # ==============================================================================
-print(f"\n--- 2. Separando Conjuntos ---")
 
-# 1. Validação (Futuro)
+# Validação (Futuro)
 df_valid = df_clean.iloc[VAL_INICIO:].copy()
 
-# 2. Treino Total (Passado)
+# Treino Total (Passado)
 df_treino_total = df_clean.iloc[:VAL_INICIO].copy()
 
-# 3. Filtro Elite
+# Filtro Elite
 erro_real = df_treino_total['temperaturamediareal'] - df_treino_total['temperaturaobjetivada']
 mask_gold = (erro_real >= -DELTA_NEG) & (erro_real <= DELTA_POS)
 
@@ -91,23 +88,22 @@ print(f"Validação: {len(df_valid)}")
 # ==============================================================================
 # 5. CLUSTERING (TREINADO SÓ NA ELITE)
 # ==============================================================================
-print("\n--- 3. Criando Clusters Químicos (Baseado na Elite) ---")
 
 # Colunas que definem a química
 cols_quimica = ['C_Medio', 'al_min', 'n_min', 's_min']
 
-# 1. Preparar dados da Elite
+# Preparar dados da Elite
 X_cluster_train = df_treino_gold[cols_quimica].fillna(0)
 
-# 2. Fit Scaler (Só na Elite)
+# Fit Scaler (Só na Elite)
 scaler = StandardScaler()
 X_cluster_train_scaled = scaler.fit_transform(X_cluster_train)
 
-# 3. Fit K-Means (Só na Elite)
+# Fit K-Means (Só na Elite)
 kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
 kmeans.fit(X_cluster_train_scaled)
 
-# 4. Aplicar Clusters (Predict) em TODOS os conjuntos
+# Aplicar Clusters (Predict) em TODOS os conjuntos
 def aplicar_cluster(df_target, nome):
     # Preenche NaN
     X_c = df_target[cols_quimica].fillna(0)
@@ -127,8 +123,6 @@ df_valid = aplicar_cluster(df_valid, "Validação")
 # Adiciona o Cluster na lista de colunas para One-Hot Encoding
 OHE_COL.append('Cluster_Quimico')
 
-# Agora podemos dropar as colunas químicas originais se quisermos (opcional)
-# Vou mantê-las pois vimos que o modelo gosta de C_Medio e Al_min.
 
 # ==============================================================================
 # 6. SEPARAÇÃO X/Y
@@ -143,9 +137,8 @@ X_valid, Y_valid = split_XY(df_valid)
 X_dirty, Y_dirty = split_XY(df_treino_dirty)
 
 # ==============================================================================
-# 7. ENCODING (DELTA STRATEGY)
+# 7. ENCODING 
 # ==============================================================================
-print("\n--- 4. Aplicando Encoders (Delta) ---")
 
 def encode_target_and_ohe(X_train, y_train, list_X_apply, df_train_full, woe_cols, ohe_cols):
     temp_obj_train = df_train_full.loc[y_train.index, 'temperaturaobjetivada']
@@ -186,13 +179,9 @@ best_params = {
     "verbosity": 0, "n_jobs": -1
 }
 
-print("\n--- 5. Treinando Modelo Único (XGBoost) ---")
 model_unique = XGBRegressor(**best_params)
 model_unique.fit(X_elite_final, Y_elite)
 
-# ==============================================================================
-# 10. AVALIAÇÃO E GRÁFICOS
-# ==============================================================================
 # ==============================================================================
 # 8. FUNÇÃO DE AVALIAÇÃO (CORRIGIDA - BINS DINÂMICOS)
 # ==============================================================================
@@ -231,7 +220,7 @@ def avaliar_cenario_unico(X_input, df_orig, Y_orig, nome_dataset, usar_vies=Fals
         df_timeline['Legado_Quente'] = (erro_legado > DELTA_POS).astype(int)
         df_timeline['Novo_Quente']   = (erro_novo > DELTA_POS).astype(int)
 
-        # >>> CORREÇÃO AQUI: BINNING DINÂMICO <<<
+        # Define bins dinâmicos
         total_linhas = len(df_timeline)
         
         if total_linhas < 1000:
